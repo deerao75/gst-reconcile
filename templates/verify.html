@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Review Mapping Columns</h2>
+  <p class="muted">
+    We auto-detected the column headings used for reconciliation. <br>
+    Please <b>check</b> that the selections below correctly point to GSTIN, Invoice Number, Invoice Date, CGST, SGST and IGST in each file.
+    If a heading looks wrong, choose the correct one from the dropdown before continuing.
+  </p>
+
+  <form id="verifyForm" action="{{ url_for('reconcile_confirm') }}" method="post">
+    <div class="verify-grid">
+      <!-- Purchase Register -->
+      <div class="verify-box">
+        <h3>Purchase Register (PR)</h3>
+        <label>GSTIN
+          <select name="gst_pr">
+            {% for c in cols_pr %}
+              <option value="{{ c }}" {% if c == gst_pr %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Invoice Number
+          <select name="inv_pr">
+            {% for c in cols_pr %}
+              <option value="{{ c }}" {% if c == inv_pr %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Invoice Date
+          <select name="date_pr">
+            {% for c in cols_pr %}
+              <option value="{{ c }}" {% if c == date_pr %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>CGST
+          <select name="cgst_pr">
+            {% for c in cols_pr %}
+              <option value="{{ c }}" {% if c == cgst_pr %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>SGST
+          <select name="sgst_pr">
+            {% for c in cols_pr %}
+              <option value="{{ c }}" {% if c == sgst_pr %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>IGST
+          <select name="igst_pr">
+            {% for c in cols_pr %}
+              <option value="{{ c }}" {% if c == igst_pr %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+
+      <!-- GSTR-2B -->
+      <div class="verify-box">
+        <h3>GSTR-2B</h3>
+        <label>GSTIN
+          <select name="gst_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == gst_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Invoice Number
+          <select name="inv_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == inv_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Invoice Date
+          <select name="date_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == date_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>CGST
+          <select name="cgst_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == cgst_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>SGST
+          <select name="sgst_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == sgst_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>IGST
+          <select name="igst_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == igst_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div class="verify-actions">
+      <button type="submit" class="btn-main" id="submitBtn">
+        Continue &nbsp;→&nbsp; Generate Reconciliation
+      </button>
+      <a href="{{ url_for('index') }}" class="btn-secondary">Start Over</a>
+    </div>
+  </form>
+
+  <!-- Progress Overlay -->
+  <div id="progressOverlay" class="progress-overlay" style="display:none;">
+    <div class="progress-box">
+      <div class="loader"></div>
+      <p id="progressMessage">Reconciliation in progress… Please wait.</p>
+    </div>
+  </div>
+</section>
+
+<style>
+.verify-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.verify-box {
+  padding: 1rem;
+  border: 1px solid #eee;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.verify-box h3 {
+  margin-top: 0;
+  color: #ff7b00;
+}
+.verify-box label {
+  display: block;
+  margin: 0.5rem 0;
+  font-weight: 600;
+  color: #222;
+}
+.verify-box select {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  font-size: 0.95rem;
+  background: #fafafa;
+}
+
+/* buttons aligned and visually consistent */
+.verify-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  justify-content: center;
+  margin-top: 1.5rem;
+}
+.btn-main, .btn-secondary {
+  display: inline-block;
+  padding: 0.6rem 1.2rem;
+  border-radius: 8px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  text-align: center;
+  min-width: 190px;
+}
+.btn-main {
+  background-color: #ff7b00;
+  border: 1px solid #ff7b00;
+  color: #fff;
+}
+.btn-main:hover {
+  background-color: #e56d00;
+}
+.btn-secondary {
+  background-color: #fff;
+  border: 1px solid #ccc;
+  color: #333;
+}
+.btn-secondary:hover {
+  background-color: #f5f5f5;
+}
+
+/* progress overlay */
+.progress-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.progress-box {
+  background: #fff;
+  padding: 2rem 2.5rem;
+  border-radius: 12px;
+  text-align: center;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+}
+.loader {
+  border: 6px solid #eee;
+  border-top: 6px solid #ff7b00;
+  border-radius: 50%;
+  width: 48px;
+  height: 48px;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 1rem auto;
+}
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+#progressMessage {
+  font-size: 1rem;
+  color: #333;
+  margin: 0;
+}
+</style>
+
+<script>
+const form = document.getElementById('verifyForm');
+const overlay = document.getElementById('progressOverlay');
+const progressMsg = document.getElementById('progressMessage');
+
+form.addEventListener('submit', function() {
+  overlay.style.display = 'flex';
+  progressMsg.textContent = 'Reconciliation in progress… Please wait.';
+});
+
+// When file is downloaded, hide spinner and show success
+window.addEventListener('focus', function() {
+  // Once the download finishes and browser refocuses, update overlay
+  if (overlay.style.display === 'flex') {
+    document.querySelector('.loader').style.display = 'none';
+    progressMsg.textContent = 'Reconciliation file downloaded successfully.';
+    setTimeout(() => { overlay.style.display = 'none'; }, 2500);
+  }
+});
+</script>
+{% endblock %}

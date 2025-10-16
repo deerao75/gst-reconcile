@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Upload Files for Reconciliation</h2>
+  <p class="muted" style="text-align: justify;">
+  Upload the two Excel files. GSTR 2B downloaded from the GST Portal
+  [2B sheet must have <b>B2B</b> and <b>B2B-CDNR</b> with headers on rows <b>5 &amp; 6]</b>
+  and your Purchase Register.
+  The program will automatically identify the columns to be mapped.
+  After upload click the reconcile and download button,
+  you will see a review step to confirm the column headings used for mapping.
+  </p>
+
+
+  <form class="upload-form" action="{{ url_for('verify_columns') }}" method="post" enctype="multipart/form-data">
+    <div class="upload-grid">
+      <div class="upload-box">
+        <h3>GSTR-2B</h3>
+        <p class="hint">Reads <b>B2B</b> &amp; <b>B2B-CDNR</b>; rows 5–6 as header.</p>
+        <label class="filebtn">
+          Choose File
+          <input id="file2b" type="file" name="gstr2b" accept=".xls,.xlsx" required>
+        </label>
+        <p id="file2bName" class="upload-confirm"></p>
+      </div>
+
+      <div class="upload-box">
+        <h3>Purchase Register</h3>
+        <p class="hint">.xlsx or .xls</p>
+        <label class="filebtn">
+          Choose File
+          <input id="filepr" type="file" name="purchase_register" accept=".xls,.xlsx" required>
+        </label>
+        <p id="fileprName" class="upload-confirm"></p>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="cta">Consolidate, Reconcile &amp; Download</button>
+    </div>
+
+    <!-- Mapping remark details -->
+    <div class="remark-box">
+      <h3>Mapping Remarks Explained</h3>
+      <ul>
+        <li><b>Matched:</b> GSTIN and Invoice Number are concatenated to form a unique key. If these match between PR and 2B and all other fields (CGST, SGST, IGST, Date) also align, the record is marked as <span class="matched">Matched</span>.</li>
+        <li><b>Almost Matched:</b> GSTIN + Invoice Number match perfectly, but one or more other fields (such as tax amounts or date) differ slightly. These are marked as <span class="almost">Almost Matched</span>.</li>
+        <li><b>Not Matched:</b> The record exists only on one side — either <span class="missing">Missing in GSTR-2B</span> or <span class="missing">Missing in Purchase Register</span>.</li>
+      </ul>
+    </div>
+  </form>
+</section>
+
+<style>
+.upload-confirm {
+  margin: .4rem 0 0;
+  font-size: .92rem;
+  color: #fff; /* changed from #333 to white */
+}
+
+.remark-box {
+  margin-top: 2rem;
+  padding: 1rem 1.2rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+.remark-box h3 {
+  margin-top: 0;
+  color: #ffa347;
+}
+.remark-box ul {
+  list-style: disc;
+  padding-left: 1.4rem;
+  margin: 0.6rem 0 0 0;
+}
+.remark-box li {
+  margin: 0.4rem 0;
+  line-height: 1.4rem;
+  font-size: 0.95rem;
+}
+.remark-box span.matched {
+  color: #4ae27e;
+  font-weight: 600;
+}
+.remark-box span.almost {
+  color: #ffd966;
+  font-weight: 600;
+}
+.remark-box span.missing {
+  color: #ff7b00;
+  font-weight: 600;
+}
+</style>
+
+<script>
+  const f2b = document.getElementById('file2b');
+  const fpr = document.getElementById('filepr');
+  const n2b = document.getElementById('file2bName');
+  const npr = document.getElementById('fileprName');
+
+  function showName(input, labelEl, label) {
+    if (input.files && input.files.length) {
+      labelEl.textContent = `${label}: ${input.files[0].name}`;
+    } else {
+      labelEl.textContent = '';
+    }
+  }
+  f2b.addEventListener('change', () => showName(f2b, n2b, 'GSTR-2B file selected'));
+  fpr.addEventListener('change', () => showName(fpr, npr, 'Purchase Register file selected'));
+</script>
+{% endblock %}

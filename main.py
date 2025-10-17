@@ -74,7 +74,7 @@ VENDOR_NAME_PR_CANDIDATES = [
 ]
 GSTR1_STATUS_2B_CANDIDATES = [
     "gstr-1 filing status", "gstr1 filing status", "filing status", "filing status details",
-    "gstr1 status", "gstr-1 status", "status"
+    "gstr1 status", "gstr-1 status", "status", "tax period", "return period"
 ]
 
 # -------------------- Column detection helpers --------------------
@@ -101,7 +101,6 @@ def normalize_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
     cleaned = []
     for c in original_cols:
         norm = _softnorm(c)
-        # keep first seen original for a given normalized key
         if norm not in norm_to_original:
             norm_to_original[norm] = str(c)
         cleaned.append(str(c).replace("\xa0", " ").strip())
@@ -123,10 +122,8 @@ def _score_columns(df: pd.DataFrame, candidates: List[str], avoid_terms: Optiona
         if any(n == cn for cn in cand_norms): score += 5
         if any(cn in n for cn in cand_norms): score += 3
         if any(n.startswith(cn) for cn in cand_norms): score += 2
-        # light boosts for useful tokens
         if "inv" in n: score += 1
         if "gst" in n: score += 1
-        # penalties
         if any(an in n for an in avoid_norms): score -= 4
         if any(pn in n for pn in penalty_norms): score -= 3
         scores.append((score, col))
@@ -166,7 +163,6 @@ def _looks_like_gstin_series(s: pd.Series) -> float:
     return hits / max(1, len(vals))
 
 def _looks_like_invoice_series(s: pd.Series) -> float:
-    # invoice-like: 6-25 chars, alnum or -/., not all letters, not a GSTIN
     if s is None: return 0.0
     vals = s.dropna().astype(str).str.strip().head(500)
     if vals.empty: return 0.0
@@ -199,12 +195,10 @@ def pick_invoice_by_values(df: pd.DataFrame) -> Optional[str]:
     best = (0.0, None)
     for col in df.columns:
         n = _norm(col)
-        # skip obvious non-invoice columns
         if any(k in n for k in ["gstin", "gst", "tax", "cgst", "sgst", "igst", "amount", "value", "taxable",
                                  "company", "recipient", "buyer", "customer", "date", "period"]):
             continue
         if any(k in n for k in ["document", "docnumber", "voucher"]):
-            # still allow "doc no" if its values look strongly invoice-like
             pass
         score = _looks_like_invoice_series(df[col])
         if score > best[0]:
@@ -227,10 +221,8 @@ def clean_gstin(value) -> str:
     return re.sub(r'\s+', '', as_text(value).upper())
 
 def inv_basic(s) -> str:
-    # normalize invoice-like values; keep alnum + common separators; strip leading zeros sensibly
     v = as_text(s).upper()
     v = re.sub(r'\s+', '', v)
-    # don't strip zeros if it's entirely zeros
     if re.search(r'\d', v):
         v = re.sub(r'^0+(?=[A-Z0-9])', '', v)
     return v
@@ -247,22 +239,18 @@ def parse_date_cell(x) -> Optional[datetime.date]:
     s = str(x).strip()
     if not s:
         return None
-
     if isinstance(x, (pd.Timestamp, datetime)):
         try:
             return pd.to_datetime(x).date()
         except Exception:
             pass
-
     if re.fullmatch(r"\d{4,6}", s):
         dt = _parse_excel_serial(s)
         if not pd.isna(dt):
             return dt.date()
-
     dt = pd.to_datetime(s, dayfirst=True, errors='coerce')
     if not pd.isna(dt):
         return dt.date()
-
     for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d",
                 "%d.%m.%Y", "%d-%b-%Y", "%d-%b-%y", "%d %b %Y",
                 "%m/%d/%Y", "%m-%d-%Y"):
@@ -270,7 +258,6 @@ def parse_date_cell(x) -> Optional[datetime.date]:
             return datetime.strptime(s, fmt).date()
         except Exception:
             continue
-
     return None
 
 def parse_amount(x) -> float:
@@ -544,6 +531,7 @@ def build_pairwise_recon(
     return out[final_cols], {
         "cgst_pr_col": cgst_pr_col, "sgst_pr_col": sgst_pr_col, "igst_pr_col": igst_pr_col,
         "cgst_2b_col": cgst_2b_col, "sgst_2b_col": sgst_2b_col, "igst_2b_col": igst_2b_col,
+        "gstr1_status_2b_col": gstr1_status_2b  # <-- expose for "2B month"
     }
 
 # -------------------- Dashboard --------------------
@@ -640,7 +628,6 @@ def verify_columns():
     sgst_pr = _pick_column(df_pr_raw, SGST_CANDIDATES_PR)
     igst_pr = _pick_column(df_pr_raw, IGST_CANDIDATES_PR)
 
-    # value-based safety net preview (used definitively in /reconcile_confirm)
     if not gst_pr or gst_pr not in df_pr_raw.columns:
         guess = pick_gstin_by_values(df_pr_raw, prefer_supplier=True)
         if guess: gst_pr = guess
@@ -665,7 +652,7 @@ def reconcile_confirm():
         flash("Upload session expired. Please re-upload the files.")
         return redirect(url_for("index"))
 
-    # Read user selections (may be blank/missing)
+    # Read user selections
     inv_2b_sel = (request.form.get("inv_2b") or "").strip()
     gst_2b_sel = (request.form.get("gst_2b") or "").strip()
     date_2b_sel = (request.form.get("date_2b") or "").strip()
@@ -696,7 +683,7 @@ def reconcile_confirm():
     df_pr_raw = pd.read_excel(tmppr)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)  # normalize PR headers, keep map
 
-    # ---- Robust fallback: normalized selection must match ANY header (case/space-insensitive) ----
+    # ---- Robust fallback: normalized selection must match ANY header ----
     def match_provided(df: pd.DataFrame, provided: str) -> Optional[str]:
         if not provided:
             return None
@@ -704,21 +691,17 @@ def reconcile_confirm():
         for c in df.columns:
             if _softnorm(c) == p:
                 return c
-        # also try via norm map if available
         if p in pr_norm_map:
             return pr_norm_map[p]
         return None
 
     def ensure_col(df, provided, candidates, avoid=None, penalties=None, value_picker=None):
-        # 1) honor provided selection (normalized)
         col = match_provided(df, provided)
         if col and col in df.columns:
             return col
-        # 2) name-based pick
         pick = _pick_column(df, candidates, avoid_terms=avoid, extra_penalties=penalties)
         if pick:
             return pick
-        # 3) value-based pick
         if value_picker:
             guess = value_picker(df)
             if guess:
@@ -732,7 +715,6 @@ def reconcile_confirm():
     sgst_2b = ensure_col(df_2b_raw, sgst_2b_sel, SGST_CANDIDATES_2B)
     igst_2b = ensure_col(df_2b_raw, igst_2b_sel, IGST_CANDIDATES_2B)
 
-    # PR: avoid recipient/company GSTIN; avoid voucher/doc for invoice; add value-based picker
     gst_pr = ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
                         penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
                         value_picker=lambda d: pick_gstin_by_values(d, prefer_supplier=True))
@@ -745,7 +727,6 @@ def reconcile_confirm():
     sgst_pr = ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
     igst_pr = ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
 
-    # Validate the two essentials for keys
     if not inv_2b or not gst_2b or not inv_pr or not gst_pr:
         flash("Could not detect essential columns (GSTIN/Invoice). Please review your selections.")
         return redirect(url_for("index"))
@@ -768,6 +749,7 @@ def reconcile_confirm():
     for must in [cgst_pr, sgst_pr, igst_pr]:
         if must and must not in optional_numeric_pr: optional_numeric_pr.append(must)
 
+    # Consolidated by key for recon
     df_2b = consolidate_by_key(df=df_2b_raw, gstin_col=gst_2b, inv_col=inv_2b, date_col=date_2b, numeric_cols=optional_numeric_2b)
     df_pr = consolidate_by_key(df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr, date_col=date_pr, numeric_cols=optional_numeric_pr)
 
@@ -777,7 +759,41 @@ def reconcile_confirm():
         inv_2b=inv_2b, gst_2b=gst_2b, date_2b=date_2b, cgst_2b=cgst_2b, sgst_2b=sgst_2b, igst_2b=igst_2b
     )
 
+    # ---------------- NEW: create PR - Comments sheet data ----------------
+    # prepare mapping lookup from combined_df (_GST_KEY,_INV_KEY) -> (Mapping,Remarks,Reason)
+    recon_lookup = {}
+    for _, row in combined_df.iterrows():
+        key = (as_text(row.get("_GST_KEY", "")), as_text(row.get("_INV_KEY", "")))
+        recon_lookup[key] = (row.get("Mapping", ""), row.get("Remarks", ""), row.get("Reason", ""))
+
+    # Build PR - Comments on raw PR rows
+    pr_comments = df_pr_raw.copy()
+    if gst_pr in pr_comments.columns and inv_pr in pr_comments.columns:
+        pr_comments["_GST_KEY"] = pr_comments[gst_pr].map(clean_gstin)
+        pr_comments["_INV_KEY"] = pr_comments[inv_pr].map(inv_basic)
+        pr_comments["Mapping"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[0], axis=1)
+        pr_comments["Remarks"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[1], axis=1)
+        pr_comments["Reason"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[2], axis=1)
+        # keep original columns + appended
+        pr_comments = pr_comments[[c for c in df_pr_raw.columns] + ["Mapping", "Remarks", "Reason"]]
+    else:
+        # If for some reason keys not found, still return original with empty columns
+        pr_comments["Mapping"] = ""
+        pr_comments["Remarks"] = ""
+        pr_comments["Reason"] = ""
+
+    # ---------------- Prepare Dashboard (transposed) ----------------
     dashboard_df = build_dashboard(combined_df, pair_cols)
+    dashboard_tx = dashboard_df.set_index("Metric").T.reset_index()
+    dashboard_tx.rename(columns={"index": "Status"}, inplace=True)
+
+    # ---------------- Add extra columns to Reconciliation ----------------
+    # 2B month: try to pick GSTR-1 filing/period column detected from 2B side
+    gstr1_col = pair_cols.get("gstr1_status_2b_col", None)
+    two_b_month_series = combined_df[gstr1_col] if gstr1_col and gstr1_col in combined_df.columns else ""
+    combined_df["2B month"] = two_b_month_series
+    combined_df["Eligibility"] = ""
+    combined_df["User Remarks"] = ""
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -834,9 +850,9 @@ def reconcile_confirm():
                     data_range, FormulaRule(formula=[f'LOWER($${rem_col}2)="missing in 2b"'.replace("$$", "$")], fill=blue)
                 )
 
-        # Dashboard
+        # Dashboard (TRANSPOSED)
         dash_name = "Dashboard"
-        dashboard_df.to_excel(writer, index=False, sheet_name=dash_name)
+        dashboard_tx.to_excel(writer, index=False, sheet_name=dash_name)
         ws2 = wb[dash_name]
 
         head_fill = PatternFill("solid", fgColor="000000")
@@ -847,15 +863,36 @@ def reconcile_confirm():
             cell.alignment = Alignment(vertical="center")
 
         from openpyxl.styles import PatternFill
-        col_colors = {2: "C6EFCE", 3: "FFF2CC", 4: "F8CBAD"}
-        for col_idx, color in col_colors.items():
-            fill = PatternFill("solid", fgColor=color)
-            for r in range(2, ws2.max_row + 1):
-                ws2.cell(row=r, column=col_idx).fill = fill
+        # Fill per data columns (now columns are metrics; first col is 'Status')
+        for col_idx in range(2, ws2.max_column + 1):
+            # try to color by column header
+            hdr = str(ws2.cell(row=1, column=col_idx).value or "")
+            color = None
+            if "Matched" in hdr: color = "C6EFCE"
+            elif "Almost" in hdr: color = "FFF2CC"
+            elif "Not Matched" in hdr: color = "F8CBAD"
+            if color:
+                fill = PatternFill("solid", fgColor=color)
+                for r in range(2, ws2.max_row + 1):
+                    ws2.cell(row=r, column=col_idx).fill = fill
 
         from openpyxl.utils import get_column_letter
         for idx, cell in enumerate(ws2[1], start=1):
             ws2.column_dimensions[get_column_letter(idx)].width = 22 if idx == 1 else 18
+
+        # PR - Comments sheet
+        prc_name = "PR - Comments"
+        pr_comments.to_excel(writer, index=False, sheet_name=prc_name)
+        ws3 = wb[prc_name]
+        for cell in ws3[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(vertical="center")
+        ws3.freeze_panes = "A2"
+        ws3.auto_filter.ref = ws3.dimensions
+        for idx, cell in enumerate(ws3[1], start=1):
+            header_len = len(str(cell.value)) if cell.value else 8
+            ws3.column_dimensions[get_column_letter(idx)].width = min(max(header_len + 6, 14), 48)
 
     output.seek(0)
 

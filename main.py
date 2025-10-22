@@ -7,12 +7,58 @@ from datetime import datetime
 from typing import Optional, Dict, List, Tuple
 from collections import defaultdict
 
-from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session
+from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session, jsonify
+
 import pandas as pd
+
+# ------- NEW: Queue & Google Drive imports -------
+from redis import Redis
+from rq import Queue, get_current_job
+from rq.job import Job
+
+from googleapiclient.discovery import build
+from google.oauth2 import service_account
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+
+# -------------------- Flask & App Config --------------------
 
 app = Flask(__name__)
 app.secret_key = "change-this-secret"
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB
+
+# ------- NEW: Redis Queue (for background jobs) -------
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+rconn = Redis.from_url(REDIS_URL)
+q = Queue("reconcile", connection=rconn)
+
+# ------- NEW: Google Drive service (service account) -------
+SCOPES = ['https://www.googleapis.com/auth/drive']
+SERVICE_ACCOUNT_FILE = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'cred.json')
+DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', None)
+
+def _drive_service():
+    creds = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
+    return build('drive', 'v3', credentials=creds, cache_discovery=False)
+
+def upload_to_drive(local_path: str, filename: str) -> str:
+    service = _drive_service()
+    metadata = {'name': filename}
+    if DRIVE_FOLDER_ID:
+        metadata['parents'] = [DRIVE_FOLDER_ID]
+    media = MediaFileUpload(local_path, resumable=True)
+    file = service.files().create(body=metadata, media_body=media, fields='id').execute()
+    return file.get('id')
+
+def download_from_drive(file_id: str, local_path: str):
+    service = _drive_service()
+    request = service.files().get_media(fileId=file_id)
+    with io.FileIO(local_path, 'wb') as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
 
 # -------------------- Column candidates --------------------
 
@@ -511,6 +557,9 @@ def build_pairwise_recon(
             if score > best_score: best, best_score = col, score
         return best if best_score > 0 else None
 
+    pr_cols_all = [c for c in out.columns if c.endswith("_PR")]
+    b2_cols_all = [c for c in out.columns if c.endswith("_2B")]
+
     vendor_name_pr = pick_from_list(pr_cols_all, [f"{x}_PR" for x in VENDOR_NAME_PR_CANDIDATES])
     gstr1_status_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in GSTR1_STATUS_2B_CANDIDATES])
 
@@ -645,31 +694,13 @@ def verify_columns():
         inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr
     )
 
-@app.route("/reconcile_confirm", methods=["POST"])
-def reconcile_confirm():
-    tmp2b = session.get("tmp2b"); tmppr = session.get("tmppr")
-    if not tmp2b or not tmppr or (not os.path.exists(tmp2b)) or (not os.path.exists(tmppr)):
-        flash("Upload session expired. Please re-upload the files.")
-        return redirect(url_for("index"))
-
-    # Read user selections
-    inv_2b_sel = (request.form.get("inv_2b") or "").strip()
-    gst_2b_sel = (request.form.get("gst_2b") or "").strip()
-    date_2b_sel = (request.form.get("date_2b") or "").strip()
-    cgst_2b_sel = (request.form.get("cgst_2b") or "").strip()
-    sgst_2b_sel = (request.form.get("sgst_2b") or "").strip()
-    igst_2b_sel = (request.form.get("igst_2b") or "").strip()
-
-    inv_pr_sel = (request.form.get("inv_pr") or "").strip()
-    gst_pr_sel = (request.form.get("gst_pr") or "").strip()
-    date_pr_sel = (request.form.get("date_pr") or "").strip()
-    cgst_pr_sel = (request.form.get("cgst_pr") or "").strip()
-    sgst_pr_sel = (request.form.get("sgst_pr") or "").strip()
-    igst_pr_sel = (request.form.get("igst_pr") or "").strip()
-
+# ------- Extracted heavy logic into a helper so the worker can call it -------
+def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
+                                 inv_2b_sel: str, gst_2b_sel: str, date_2b_sel: str, cgst_2b_sel: str, sgst_2b_sel: str, igst_2b_sel: str,
+                                 inv_pr_sel: str, gst_pr_sel: str, date_pr_sel: str, cgst_pr_sel: str, sgst_pr_sel: str, igst_pr_sel: str) -> bytes:
     # Reload sheets
     wanted_sheets = ["B2B", "B2B-CDNR"]
-    xls_2b = pd.read_excel(tmp2b, sheet_name=wanted_sheets, header=[4, 5])
+    xls_2b = pd.read_excel(tmp2b_path, sheet_name=wanted_sheets, header=[4, 5])
     frames = []
     for _, df in xls_2b.items():
         df = df.copy()
@@ -680,7 +711,7 @@ def reconcile_confirm():
             frames.append(df)
     df_2b_raw = pd.concat(frames, ignore_index=True)
 
-    df_pr_raw = pd.read_excel(tmppr)
+    df_pr_raw = pd.read_excel(tmppr_path)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)  # normalize PR headers, keep map
 
     # ---- Robust fallback: normalized selection must match ANY header ----
@@ -727,10 +758,6 @@ def reconcile_confirm():
     sgst_pr = ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
     igst_pr = ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
 
-    if not inv_2b or not gst_2b or not inv_pr or not gst_pr:
-        flash("Could not detect essential columns (GSTIN/Invoice). Please review your selections.")
-        return redirect(url_for("index"))
-
     optional_numeric_2b = []
     for pool in [[ "taxable value","taxable amount","assessable value","taxable" ],
                  [ "total tax","total tax amount","tax amount" ],
@@ -759,14 +786,12 @@ def reconcile_confirm():
         inv_2b=inv_2b, gst_2b=gst_2b, date_2b=date_2b, cgst_2b=cgst_2b, sgst_2b=sgst_2b, igst_2b=igst_2b
     )
 
-    # ---------------- NEW: create PR - Comments sheet data ----------------
-    # prepare mapping lookup from combined_df (_GST_KEY,_INV_KEY) -> (Mapping,Remarks,Reason)
+    # ---------------- NEW: PR - Comments sheet data ----------------
     recon_lookup = {}
     for _, row in combined_df.iterrows():
         key = (as_text(row.get("_GST_KEY", "")), as_text(row.get("_INV_KEY", "")))
         recon_lookup[key] = (row.get("Mapping", ""), row.get("Remarks", ""), row.get("Reason", ""))
 
-    # Build PR - Comments on raw PR rows
     pr_comments = df_pr_raw.copy()
     if gst_pr in pr_comments.columns and inv_pr in pr_comments.columns:
         pr_comments["_GST_KEY"] = pr_comments[gst_pr].map(clean_gstin)
@@ -774,10 +799,8 @@ def reconcile_confirm():
         pr_comments["Mapping"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[0], axis=1)
         pr_comments["Remarks"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[1], axis=1)
         pr_comments["Reason"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[2], axis=1)
-        # keep original columns + appended
         pr_comments = pr_comments[[c for c in df_pr_raw.columns] + ["Mapping", "Remarks", "Reason"]]
     else:
-        # If for some reason keys not found, still return original with empty columns
         pr_comments["Mapping"] = ""
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
@@ -788,7 +811,6 @@ def reconcile_confirm():
     dashboard_tx.rename(columns={"index": "Status"}, inplace=True)
 
     # ---------------- Add extra columns to Reconciliation ----------------
-    # 2B month: try to pick GSTR-1 filing/period column detected from 2B side
     gstr1_col = pair_cols.get("gstr1_status_2b_col", None)
     two_b_month_series = combined_df[gstr1_col] if gstr1_col and gstr1_col in combined_df.columns else ""
     combined_df["2B month"] = two_b_month_series
@@ -862,10 +884,7 @@ def reconcile_confirm():
             cell.font = head_font
             cell.alignment = Alignment(vertical="center")
 
-        from openpyxl.styles import PatternFill
-        # Fill per data columns (now columns are metrics; first col is 'Status')
         for col_idx in range(2, ws2.max_column + 1):
-            # try to color by column header
             hdr = str(ws2.cell(row=1, column=col_idx).value or "")
             color = None
             if "Matched" in hdr: color = "C6EFCE"
@@ -895,19 +914,168 @@ def reconcile_confirm():
             ws3.column_dimensions[get_column_letter(idx)].width = min(max(header_len + 6, 14), 48)
 
     output.seek(0)
+    return output.read()
 
+# ------- NEW: Background worker task (called by RQ) -------
+def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:
+    job = get_current_job()
+    if job:
+        job.meta["progress"] = {"pct": 5, "msg": "Downloading"}
+        job.save_meta()
+
+    with tempfile.TemporaryDirectory() as td:
+        in2b = os.path.join(td, "gstr2b.xlsx")
+        inpr = os.path.join(td, "purchase_register.xlsx")
+        download_from_drive(drive_id_2b, in2b)
+        download_from_drive(drive_id_pr, inpr)
+
+        if job:
+            job.meta["progress"] = {"pct": 30, "msg": "Reconciling"}
+            job.save_meta()
+
+        x = selections
+        blob = _run_reconciliation_pipeline(
+            in2b, inpr,
+            x.get("inv_2b",""), x.get("gst_2b",""), x.get("date_2b",""), x.get("cgst_2b",""), x.get("sgst_2b",""), x.get("igst_2b",""),
+            x.get("inv_pr",""), x.get("gst_pr",""), x.get("date_pr",""), x.get("cgst_pr",""), x.get("sgst_pr",""), x.get("igst_pr","")
+        )
+
+        if job:
+            job.meta["progress"] = {"pct": 85, "msg": "Uploading result"}
+            job.save_meta()
+
+        out_path = os.path.join(td, f"{user_id}_gstr2b_pr_reconciliation.xlsx")
+        with open(out_path, "wb") as f:
+            f.write(blob)
+
+        result_id = upload_to_drive(out_path, os.path.basename(out_path))
+
+    if job:
+        job.meta["progress"] = {"pct": 100, "msg": "Done"}
+        job.save_meta()
+
+    return {"result_drive_id": result_id}
+
+# -------------------- QUEUED confirm route + status + download --------------------
+
+@app.route("/reconcile_confirm", methods=["POST"])
+def reconcile_confirm():
+    # Ensure temp paths from prior /verify
+    tmp2b = session.get("tmp2b"); tmppr = session.get("tmppr")
+    if not tmp2b or not tmppr or (not os.path.exists(tmp2b)) or (not os.path.exists(tmppr)):
+        flash("Upload session expired. Please re-upload the files.")
+        return redirect(url_for("index"))
+
+    # Read user selections
+    sel = {
+        "inv_2b": (request.form.get("inv_2b") or "").strip(),
+        "gst_2b": (request.form.get("gst_2b") or "").strip(),
+        "date_2b": (request.form.get("date_2b") or "").strip(),
+        "cgst_2b": (request.form.get("cgst_2b") or "").strip(),
+        "sgst_2b": (request.form.get("sgst_2b") or "").strip(),
+        "igst_2b": (request.form.get("igst_2b") or "").strip(),
+        "inv_pr": (request.form.get("inv_pr") or "").strip(),
+        "gst_pr": (request.form.get("gst_pr") or "").strip(),
+        "date_pr": (request.form.get("date_pr") or "").strip(),
+        "cgst_pr": (request.form.get("cgst_pr") or "").strip(),
+        "sgst_pr": (request.form.get("sgst_pr") or "").strip(),
+        "igst_pr": (request.form.get("igst_pr") or "").strip(),
+    }
+
+    # Upload both temp files to Google Drive and enqueue job
     try:
-        os.remove(tmp2b); os.remove(tmppr)
-    except Exception:
-        pass
-    session.pop("tmp2b", None); session.pop("tmppr", None)
+        drive_id_2b = upload_to_drive(tmp2b, "gstr2b.xlsx")
+        drive_id_pr = upload_to_drive(tmppr, "purchase_register.xlsx")
+    finally:
+        # Clean local temp & session
+        try:
+            os.remove(tmp2b); os.remove(tmppr)
+        except Exception:
+            pass
+        session.pop("tmp2b", None); session.pop("tmppr", None)
 
-    return send_file(
-        output,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        as_attachment=True,
-        download_name="gstr2b_pr_reconciliation.xlsx"
+    user_id = request.form.get("user_id", "anon")
+
+    job = q.enqueue(
+        "main.process_reconcile",  # module.function path
+        drive_id_2b, drive_id_pr, sel, user_id,
+        job_timeout=900, result_ttl=86400, failure_ttl=86400
     )
+
+    # Return a tiny progress page that polls /status and triggers /download when ready
+    return f"""
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Reconciling…</title></head>
+<body style="font-family: system-ui, sans-serif;">
+  <h3>Reconciliation started</h3>
+  <p id="msg">Queued…</p>
+  <script>
+    const jobId = "{job.id}";
+    async function poll() {{
+      try {{
+        const r = await fetch("/status/" + jobId);
+        const j = await r.json();
+        const p = j.progress || {{pct:0, msg:j.state}};
+        document.getElementById('msg').innerText = (p.pct||0) + "% - " + (p.msg||j.state);
+        if (j.state === "finished") {{
+          // trigger download
+          const d = await fetch("/download/" + jobId);
+          if (d.status === 200) {{
+            const blob = await d.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = "gstr2b_pr_reconciliation.xlsx";
+            document.body.appendChild(a); a.click(); a.remove();
+            window.URL.revokeObjectURL(url);
+            document.getElementById('msg').innerText = "Download started.";
+          }} else {{
+            document.getElementById('msg').innerText = "Error preparing download.";
+          }}
+        }} else if (j.state === "failed") {{
+          document.getElementById('msg').innerText = "Job failed. Please try again.";
+        }} else {{
+          setTimeout(poll, 2000);
+        }}
+      }} catch (e) {{
+        setTimeout(poll, 3000);
+      }}
+    }}
+    poll();
+  </script>
+</body></html>
+    """
+
+@app.route("/status/<job_id>", methods=["GET"])
+def status(job_id):
+    job = Job.fetch(job_id, connection=rconn)
+    meta = job.meta.get("progress", {"pct": 0, "msg": "queued"})
+    state = job.get_status()
+    payload = {"state": state, "progress": meta}
+    if state == "finished":
+        payload["result"] = job.result
+    elif state == "failed":
+        payload["error"] = (job.exc_info or "")[-1000:]
+    return jsonify(payload)
+
+@app.route("/download/<job_id>", methods=["GET"])
+def download(job_id):
+    job = Job.fetch(job_id, connection=rconn)
+    if job.get_status() != "finished":
+        return jsonify({"error": "Job not finished"}), 409
+    drive_id = job.result.get("result_drive_id")
+    if not drive_id:
+        return jsonify({"error": "No result id"}), 404
+
+    # Stream the Drive file to the client (no public sharing required)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "gstr2b_pr_reconciliation.xlsx")
+        download_from_drive(drive_id, path)
+        return send_file(
+            path,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name="gstr2b_pr_reconciliation.xlsx"
+        )
 
 if __name__ == "__main__":
     app.run(debug=True)

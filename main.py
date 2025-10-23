@@ -48,12 +48,20 @@ def upload_to_drive(local_path: str, filename: str) -> str:
     if DRIVE_FOLDER_ID:
         metadata['parents'] = [DRIVE_FOLDER_ID]
     media = MediaFileUpload(local_path, resumable=True)
-    file = service.files().create(body=metadata, media_body=media, fields='id').execute()
+    file = service.files().create(
+        body=metadata,
+        media_body=media,
+        fields='id',
+        supportsAllDrives=True     # <-- add this
+    ).execute()
     return file.get('id')
 
 def download_from_drive(file_id: str, local_path: str):
     service = _drive_service()
-    request = service.files().get_media(fileId=file_id)
+    request = service.files().get_media(
+        fileId=file_id,
+        supportsAllDrives=True     # <-- add this
+    )
     with io.FileIO(local_path, 'wb') as fh:
         downloader = MediaIoBaseDownload(fh, request)
         done = False

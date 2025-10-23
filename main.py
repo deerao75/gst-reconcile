@@ -825,67 +825,54 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     combined_df["Eligibility"] = ""
     combined_df["User Remarks"] = ""
 
+    # --------- FAST XLSX WRITER (XlsxWriter) ---------
+
+    def _autosize_ws(ws, df, min_w=12, max_w=48):
+        # Sample first 200 rows for width estimate to avoid full column scans
+        sample = df.head(200)
+        for col_idx, col_name in enumerate(df.columns):
+            header_len = len(str(col_name)) + 4
+            try:
+                content_len = int(sample[col_name].astype(str).map(len).max())
+                if math.isnan(content_len):
+                    content_len = 0
+            except Exception:
+                content_len = 0
+            width = max(min_w, min(max_w, max(header_len, content_len + 2)))
+            ws.set_column(col_idx, col_idx, width)
+
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # ---------------- Reconciliation (no conditional formatting) ----------------
-        sheet_name = "Reconciliation"
-        combined_df.to_excel(writer, index=False, sheet_name=sheet_name)
-
-        from openpyxl.styles import Font, PatternFill, Alignment
-        from openpyxl.utils import get_column_letter
-
+    with pd.ExcelWriter(
+        output,
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"constant_memory": True, "strings_to_urls": False}},
+    ) as writer:
         wb = writer.book
-        ws = wb[sheet_name]
+        header_fmt = wb.add_format({"bold": True})
 
-        # Header style (keep)
-        header_fill = PatternFill("solid", fgColor="000000")
-        header_font = Font(color="FFA500", bold=True)
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(vertical="center")
+        # ---------------- Reconciliation ----------------
+        combined_df.to_excel(writer, index=False, sheet_name="Reconciliation")
+        ws = writer.sheets["Reconciliation"]
+        ws.freeze_panes(1, 0)
+        ws.autofilter(0, 0, len(combined_df), max(0, combined_df.shape[1] - 1))
+        ws.set_row(0, None, header_fmt)
+        _autosize_ws(ws, combined_df)
 
-        # Usability tweaks (keep)
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        for idx, cell in enumerate(ws[1], start=1):
-            header_len = len(str(cell.value)) if cell.value else 8
-            ws.column_dimensions[get_column_letter(idx)].width = min(max(header_len + 6, 14), 48)
+        # ---------------- Dashboard ----------------
+        dashboard_tx.to_excel(writer, index=False, sheet_name="Dashboard")
+        ws2 = writer.sheets["Dashboard"]
+        ws2.freeze_panes(1, 0)
+        ws2.autofilter(0, 0, len(dashboard_tx), max(0, dashboard_tx.shape[1] - 1))
+        ws2.set_row(0, None, header_fmt)
+        _autosize_ws(ws2, dashboard_tx, min_w=14)
 
-        # ---- Removed: All conditional formatting on data_range (Mapping/Remarks) ----
-        # (We intentionally do nothing here to avoid slow openpyxl rules.)
-
-        # ---------------- Dashboard (no per-cell coloring) ----------------
-        dash_name = "Dashboard"
-        dashboard_tx.to_excel(writer, index=False, sheet_name=dash_name)
-        ws2 = wb[dash_name]
-
-        # Header style (keep)
-        for cell in ws2[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(vertical="center")
-
-        # Column widths for dashboard (keep)
-        for idx, cell in enumerate(ws2[1], start=1):
-            ws2.column_dimensions[get_column_letter(idx)].width = 22 if idx == 1 else 18
-
-        # ---- Removed: the nested loop that filled every data cell by header color ----
-        # (This was the biggest write-time cost.)
-
-        # ---------------- PR - Comments (unchanged, no conditional formatting) ----------------
-        prc_name = "PR - Comments"
-        pr_comments.to_excel(writer, index=False, sheet_name=prc_name)
-        ws3 = wb[prc_name]
-        for cell in ws3[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(vertical="center")
-        ws3.freeze_panes = "A2"
-        ws3.auto_filter.ref = ws3.dimensions
-        for idx, cell in enumerate(ws3[1], start=1):
-            header_len = len(str(cell.value)) if cell.value else 8
-            ws3.column_dimensions[get_column_letter(idx)].width = min(max(header_len + 6, 14), 48)
+        # ---------------- PR - Comments ----------------
+        pr_comments.to_excel(writer, index=False, sheet_name="PR - Comments")
+        ws3 = writer.sheets["PR - Comments"]
+        ws3.freeze_panes(1, 0)
+        ws3.autofilter(0, 0, len(pr_comments), max(0, pr_comments.shape[1] - 1))
+        ws3.set_row(0, None, header_fmt)
+        _autosize_ws(ws3, pr_comments)
 
     output.seek(0)
     return output.read()

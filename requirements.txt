@@ -1,16 +1,23 @@
-pip==24.0
-setuptools==69.5.1
-wheel==0.43.0
+# web
 Flask==3.0.3
-numpy==1.26.4
+gunicorn==21.2.0
+
+# data
+numpy==1.26.4          # works great with Python 3.11
 pandas==2.2.2
 openpyxl==3.1.5
-gunicorn==21.2.0
-rq>=1.15.0
-redis>=5.0.0
-google-api-python-client>=2.136.0
-google-auth-httplib2>=0.2.0
-google-auth-oauthlib>=1.2.0
-python-dotenv>=1.0.0
+xlsxwriter==3.2.0
+
+# queue + redis
+rq==1.15.1
+redis==5.0.8
+
+# google drive api
+google-api-python-client==2.136.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+
+# dotenv (optional)
+python-dotenv==1.0.1
 
 

@@ -654,18 +654,35 @@ def verify_columns():
     session["tmp2b"] = tmp2b.name
     session["tmppr"] = tmppr.name
 
+    # Read B2B (required) and B2B-CDNR (optional) using headers in rows 5/6
     wanted_sheets = ["B2B", "B2B-CDNR"]
-    xls_2b = pd.read_excel(tmp2b.name, sheet_name=wanted_sheets, header=[4, 5])
-
     frames = []
-    for _, df in xls_2b.items():
-        df = df.copy()
-        df.columns = flatten_columns(df.columns)
+
+    # Detect which of the wanted sheets exist
+    xls = pd.ExcelFile(tmp2b.name)
+    present_sheets = [sn for sn in wanted_sheets if sn in xls.sheet_names]
+
+    # Require at least B2B
+    if "B2B" not in present_sheets:
+        flash("Could not find a 'B2B' sheet in the GSTR-2B file.")
+        return redirect(url_for("index"))
+
+    # Read each present sheet with header rows 5/6 (index 4,5)
+    for sn in present_sheets:
+        df = pd.read_excel(tmp2b.name, sheet_name=sn, header=[4, 5])
         df = df.dropna(how="all")
-        if not df.empty:
-            df, _ = normalize_columns(df)  # normalize 2B headers
-            frames.append(df)
+        if df.empty:
+            continue
+        df.columns = flatten_columns(df.columns)
+        df, _ = normalize_columns(df)
+        frames.append(df)
+
+    if not frames:
+        flash("Could not read valid data from the GSTR-2B file.")
+        return redirect(url_for("index"))
+
     df_2b_raw = pd.concat(frames, ignore_index=True)
+
 
     df_pr_raw = pd.read_excel(tmppr.name)
     df_pr_raw, _ = normalize_columns(df_pr_raw)  # normalize PR headers
@@ -707,17 +724,34 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                                  inv_2b_sel: str, gst_2b_sel: str, date_2b_sel: str, cgst_2b_sel: str, sgst_2b_sel: str, igst_2b_sel: str,
                                  inv_pr_sel: str, gst_pr_sel: str, date_pr_sel: str, cgst_pr_sel: str, sgst_pr_sel: str, igst_pr_sel: str) -> bytes:
     # Reload sheets
+    # Read B2B (required) and B2B-CDNR (optional) using headers in rows 5/6
     wanted_sheets = ["B2B", "B2B-CDNR"]
-    xls_2b = pd.read_excel(tmp2b_path, sheet_name=wanted_sheets, header=[4, 5])
     frames = []
-    for _, df in xls_2b.items():
-        df = df.copy()
-        df.columns = flatten_columns(df.columns)
+
+    # Detect which of the wanted sheets exist
+    xls = pd.ExcelFile(tmp2b_path)
+    present_sheets = [sn for sn in wanted_sheets if sn in xls.sheet_names]
+
+    # Require at least B2B
+    if "B2B" not in present_sheets:
+        raise ValueError("Could not find a 'B2B' sheet in the GSTR-2B file.")
+
+    # Read each present sheet with header rows 5/6 (index 4,5)
+    for sn in present_sheets:
+        df = pd.read_excel(tmp2b_path, sheet_name=sn, header=[4, 5])
         df = df.dropna(how="all")
-        if not df.empty:
-            df, _ = normalize_columns(df)  # normalize 2B headers
-            frames.append(df)
+        if df.empty:
+            continue
+        df.columns = flatten_columns(df.columns)
+        df, _ = normalize_columns(df)
+        frames.append(df)
+
+    if not frames:
+        raise ValueError("Could not read valid data from the GSTR-2B file.")
+
     df_2b_raw = pd.concat(frames, ignore_index=True)
+
+
 
     df_pr_raw = pd.read_excel(tmppr_path)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)  # normalize PR headers, keep map

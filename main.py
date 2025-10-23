@@ -827,17 +827,17 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Reconciliation
+        # ---------------- Reconciliation (no conditional formatting) ----------------
         sheet_name = "Reconciliation"
         combined_df.to_excel(writer, index=False, sheet_name=sheet_name)
 
         from openpyxl.styles import Font, PatternFill, Alignment
         from openpyxl.utils import get_column_letter
-        from openpyxl.formatting.rule import FormulaRule
 
         wb = writer.book
         ws = wb[sheet_name]
 
+        # Header style (keep)
         header_fill = PatternFill("solid", fgColor="000000")
         header_font = Font(color="FFA500", bold=True)
         for cell in ws[1]:
@@ -845,69 +845,35 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             cell.font = header_font
             cell.alignment = Alignment(vertical="center")
 
+        # Usability tweaks (keep)
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
-
         for idx, cell in enumerate(ws[1], start=1):
             header_len = len(str(cell.value)) if cell.value else 8
             ws.column_dimensions[get_column_letter(idx)].width = min(max(header_len + 6, 14), 48)
 
-        headers = {str(c.value).strip(): i+1 for i, c in enumerate(ws[1])}
-        map_c = headers.get("Mapping"); rem_c = headers.get("Remarks")
+        # ---- Removed: All conditional formatting on data_range (Mapping/Remarks) ----
+        # (We intentionally do nothing here to avoid slow openpyxl rules.)
 
-        if map_c:
-            last_row = ws.max_row
-            map_col = get_column_letter(map_c)
-            rem_col = get_column_letter(rem_c) if rem_c else None
-            data_range = f"A2:{get_column_letter(ws.max_column)}{last_row}"
-
-            green = PatternFill("solid", fgColor="C6EFCE")
-            yellow = PatternFill("solid", fgColor="FFF2CC")
-            red = PatternFill("solid", fgColor="F8CBAD")
-            blue = PatternFill("solid", fgColor="CFE2F3")
-
-            ws.conditional_formatting.add(
-                data_range, FormulaRule(formula=[f'$${map_col}2="matched"'.replace("$$", "$")], fill=green)
-            )
-            ws.conditional_formatting.add(
-                data_range, FormulaRule(formula=[f'$${map_col}2="Almost Match"'.replace("$$", "$")], fill=yellow)
-            )
-            if rem_col:
-                ws.conditional_formatting.add(
-                    data_range, FormulaRule(formula=[f'LOWER($${rem_col}2)="missing in pr"'.replace("$$", "$")], fill=red)
-                )
-                ws.conditional_formatting.add(
-                    data_range, FormulaRule(formula=[f'LOWER($${rem_col}2)="missing in 2b"'.replace("$$", "$")], fill=blue)
-                )
-
-        # Dashboard (TRANSPOSED)
+        # ---------------- Dashboard (no per-cell coloring) ----------------
         dash_name = "Dashboard"
         dashboard_tx.to_excel(writer, index=False, sheet_name=dash_name)
         ws2 = wb[dash_name]
 
-        head_fill = PatternFill("solid", fgColor="000000")
-        head_font = Font(color="FFA500", bold=True)
+        # Header style (keep)
         for cell in ws2[1]:
-            cell.fill = head_fill
-            cell.font = head_font
+            cell.fill = header_fill
+            cell.font = header_font
             cell.alignment = Alignment(vertical="center")
 
-        for col_idx in range(2, ws2.max_column + 1):
-            hdr = str(ws2.cell(row=1, column=col_idx).value or "")
-            color = None
-            if "Matched" in hdr: color = "C6EFCE"
-            elif "Almost" in hdr: color = "FFF2CC"
-            elif "Not Matched" in hdr: color = "F8CBAD"
-            if color:
-                fill = PatternFill("solid", fgColor=color)
-                for r in range(2, ws2.max_row + 1):
-                    ws2.cell(row=r, column=col_idx).fill = fill
-
-        from openpyxl.utils import get_column_letter
+        # Column widths for dashboard (keep)
         for idx, cell in enumerate(ws2[1], start=1):
             ws2.column_dimensions[get_column_letter(idx)].width = 22 if idx == 1 else 18
 
-        # PR - Comments sheet
+        # ---- Removed: the nested loop that filled every data cell by header color ----
+        # (This was the biggest write-time cost.)
+
+        # ---------------- PR - Comments (unchanged, no conditional formatting) ----------------
         prc_name = "PR - Comments"
         pr_comments.to_excel(writer, index=False, sheet_name=prc_name)
         ws3 = wb[prc_name]
@@ -923,6 +889,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     output.seek(0)
     return output.read()
+
 
 # ------- NEW: Background worker task (called by RQ) -------
 def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:

@@ -1,23 +1,14 @@
-# web
+rq>=1.15.0
+redis>=5.0.0
 Flask==3.0.3
 gunicorn==21.2.0
-
-# data
-numpy==1.26.4          # works great with Python 3.11
+numpy==1.26.4
 pandas==2.2.2
 openpyxl==3.1.5
 xlsxwriter==3.2.0
-
-# queue + redis
-rq>=1.15.0
-redis>=5.0.0
-
-# google drive api
 google-api-python-client==2.136.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
-
-# dotenv (optional)
 python-dotenv==1.0.1
 
 

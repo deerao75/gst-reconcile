@@ -1011,47 +1011,7 @@ def reconcile_confirm():
     )
 
     # Return a tiny progress page that polls /status and triggers /download when ready
-    return f"""
-<!doctype html>
-<html><head><meta charset="utf-8"><title>Reconciling…</title></head>
-<body style="font-family: system-ui, sans-serif;">
-  <h3>Reconciliation started</h3>
-  <p id="msg">Queued…</p>
-  <script>
-    const jobId = "{job.id}";
-    async function poll() {{
-      try {{
-        const r = await fetch("/status/" + jobId);
-        const j = await r.json();
-        const p = j.progress || {{pct:0, msg:j.state}};
-        document.getElementById('msg').innerText = (p.pct||0) + "% - " + (p.msg||j.state);
-        if (j.state === "finished") {{
-          // trigger download
-          const d = await fetch("/download/" + jobId);
-          if (d.status === 200) {{
-            const blob = await d.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = "gstr2b_pr_reconciliation.xlsx";
-            document.body.appendChild(a); a.click(); a.remove();
-            window.URL.revokeObjectURL(url);
-            document.getElementById('msg').innerText = "Download started.";
-          }} else {{
-            document.getElementById('msg').innerText = "Error preparing download.";
-          }}
-        }} else if (j.state === "failed") {{
-          document.getElementById('msg').innerText = "Job failed. Please try again.";
-        }} else {{
-          setTimeout(poll, 2000);
-        }}
-      }} catch (e) {{
-        setTimeout(poll, 3000);
-      }}
-    }}
-    poll();
-  </script>
-</body></html>
-    """
+    return render_template("progress.html", job_id=job.id)
 
 @app.route("/status/<job_id>", methods=["GET"])
 def status(job_id):

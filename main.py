@@ -655,7 +655,31 @@ def verify_columns():
     session["tmppr"] = tmppr.name
 
     wanted_sheets = ["B2B", "B2B-CDNR"]
-    xls_2b = pd.read_excel(tmp2b.name, sheet_name=wanted_sheets, header=[4, 5])
+    # Try multiple possible header rows (1st, 5th, or 6th row)
+    # Try detecting header row (1st, 5th, or 6th row)
+    # Try detecting header row (1st, 5th, or 6th row)
+    xls_2b = None
+    file_path = tmp2b.name  # in this function, tmp2b is always defined
+
+    for hdr in ([0], [4, 5]):
+        try:
+            xls_2b_try = pd.read_excel(file_path, sheet_name=wanted_sheets, header=hdr)
+            # if it’s a dict of sheets, pick one sample
+            if isinstance(xls_2b_try, dict):
+                df_sample = next(iter(xls_2b_try.values()))
+            else:
+                df_sample = xls_2b_try
+            if df_sample.shape[1] > 2:
+                xls_2b = xls_2b_try
+                break
+        except Exception:
+            continue
+
+    if xls_2b is None:
+        raise ValueError("Could not detect a valid header row in GSTR-2B.")
+
+
+
 
     frames = []
     for _, df in xls_2b.items():
@@ -708,7 +732,31 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                                  inv_pr_sel: str, gst_pr_sel: str, date_pr_sel: str, cgst_pr_sel: str, sgst_pr_sel: str, igst_pr_sel: str) -> bytes:
     # Reload sheets
     wanted_sheets = ["B2B", "B2B-CDNR"]
-    xls_2b = pd.read_excel(tmp2b_path, sheet_name=wanted_sheets, header=[4, 5])
+    # Try multiple possible header rows (1st, 5th, or 6th row)
+    # Try detecting header row (1st, 5th, or 6th row)
+    # Try detecting header row (1st, 5th, or 6th row)
+    xls_2b = None
+    file_path = tmp2b_path  # in this function, tmp2b_path is always defined
+
+    for hdr in ([0], [4, 5]):
+        try:
+            xls_2b_try = pd.read_excel(file_path, sheet_name=wanted_sheets, header=hdr)
+            # if it’s a dict of sheets, pick one sample
+            if isinstance(xls_2b_try, dict):
+                df_sample = next(iter(xls_2b_try.values()))
+            else:
+                df_sample = xls_2b_try
+            if df_sample.shape[1] > 2:
+                xls_2b = xls_2b_try
+                break
+        except Exception:
+            continue
+
+    if xls_2b is None:
+        raise ValueError("Could not detect a valid header row in GSTR-2B.")
+
+
+
     frames = []
     for _, df in xls_2b.items():
         df = df.copy()

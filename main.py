@@ -879,42 +879,66 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
 
 # ------- NEW: Background worker task (called by RQ) -------
+from rq import get_current_job
+import tempfile, os, time
+from concurrent.futures import ThreadPoolExecutor
+
 def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:
-    job = get_current_job()
-    if job:
-        job.meta["progress"] = {"pct": 5, "msg": "Downloading"}
-        job.save_meta()
+    """
+    Faster version:
+      • Parallel downloads (2B + PR)
+      • Clear progress updates
+      • Timing logs in worker output
+    """
+    def _mark(pct, msg):
+        j = get_current_job()
+        if j:
+            j.meta["progress"] = {"pct": int(pct), "msg": msg}
+            j.save_meta()
+        print(f"[{time.strftime('%H:%M:%S')}] {pct}% - {msg}", flush=True)
+
+    t0 = time.time()
+    _mark(3, "Starting")
 
     with tempfile.TemporaryDirectory() as td:
         in2b = os.path.join(td, "gstr2b.xlsx")
         inpr = os.path.join(td, "purchase_register.xlsx")
-        download_from_drive(drive_id_2b, in2b)
-        download_from_drive(drive_id_pr, inpr)
 
-        if job:
-            job.meta["progress"] = {"pct": 30, "msg": "Reconciling"}
-            job.save_meta()
+        # ---- Download both files concurrently (overlap network I/O) ----
+        _mark(5, "Downloading inputs from Drive")
+        def _dl(fid, path):
+            download_from_drive(fid, path)
+            return path
 
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut2b = ex.submit(_dl, drive_id_2b, in2b)
+            futpr = ex.submit(_dl, drive_id_pr, inpr)
+            # Wait for both
+            fut2b.result()
+            futpr.result()
+
+        _mark(22, f"Downloads finished in {time.time()-t0:.1f}s")
+
+        # ---- Reconcile + build XLSX (XlsxWriter used inside pipeline) ----
+        _mark(30, "Reconciling")
         x = selections
         blob = _run_reconciliation_pipeline(
             in2b, inpr,
             x.get("inv_2b",""), x.get("gst_2b",""), x.get("date_2b",""), x.get("cgst_2b",""), x.get("sgst_2b",""), x.get("igst_2b",""),
             x.get("inv_pr",""), x.get("gst_pr",""), x.get("date_pr",""), x.get("cgst_pr",""), x.get("sgst_pr",""), x.get("igst_pr","")
         )
+        _mark(82, f"Reconcile+write took {time.time()-t0:.1f}s")
 
-        if job:
-            job.meta["progress"] = {"pct": 85, "msg": "Uploading result"}
-            job.save_meta()
-
+        # ---- Upload result to Drive (keep behavior) ----
+        _mark(85, "Uploading result to Drive")
         out_path = os.path.join(td, f"{user_id}_gstr2b_pr_reconciliation.xlsx")
         with open(out_path, "wb") as f:
             f.write(blob)
 
         result_id = upload_to_drive(out_path, os.path.basename(out_path))
+        _mark(100, f"Done in {time.time()-t0:.1f}s")
 
-    if job:
-        job.meta["progress"] = {"pct": 100, "msg": "Done"}
-        job.save_meta()
+        # Temp files are auto-removed with the TemporaryDirectory
 
     return {"result_drive_id": result_id}
 

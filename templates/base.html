@@ -4,19 +4,166 @@
   <meta charset="utf-8">
   <title>AcerGST Reconciliation</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-
   <!-- Theme: black + orange -->
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-
-  <!-- Inter font (optional, can switch to Aptos on Windows if you prefer) -->
+  <!-- Inter font -->
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Inter', sans-serif;
+      background: #0f1425;
+      color: #e0e0e0;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 24px;
+      background: #0b0f1a;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .logo img {
+      height: 40px;
+      width: auto;
+      display: block;
+    }
+    .title {
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin: 0;
+      color: white;
+    }
+    .nav-menu {
+      display: flex;
+      gap: 16px;
+    }
+    .nav-menu a, .nav-menu form button {
+      color: #ff9500;
+      text-decoration: none;
+      background: none;
+      border: none;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.95rem;
+    }
+    .nav-menu a:hover, .nav-menu form button:hover {
+      text-decoration: underline;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 24px auto;
+      padding: 0 24px;
+    }
+    .footer {
+      text-align: center;
+      padding: 20px;
+      background: #0b0f1a;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      color: #aaa;
+      font-size: 0.9rem;
+      margin-top: 40px;
+    }
+    .footer .muted {
+      color: #777;
+    }
+    .footer a {
+      color: #ff9500;
+      text-decoration: none;
+    }
+    .subscription-plans {
+      display: flex;
+      gap: 24px;
+      margin-top: 20px;
+      flex-wrap: wrap;
+    }
+    .plan {
+      background: #1a1f2f;
+      padding: 20px;
+      border-radius: 8px;
+      width: 250px;
+      text-align: center;
+    }
+    .plan h3 {
+      margin-top: 0;
+      color: white;
+    }
+    .plan .price {
+      font-size: 1.4rem;
+      font-weight: 800;
+      color: #ff9500;
+      margin: 10px 0;
+    }
+    .plan form button {
+      margin-top: 12px;
+      background: #ff9500;
+      color: #000;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .login-form, .subscribe-section {
+      background: #151a2a;
+      padding: 24px;
+      border-radius: 8px;
+      max-width: 400px;
+      margin: 24px auto;
+    }
+    .login-form input {
+      width: 100%;
+      padding: 10px;
+      margin: 8px 0;
+      border-radius: 4px;
+      border: 1px solid #444;
+      background: #0f1425;
+      color: white;
+    }
+    .login-form button {
+      background: #ff9500;
+      color: black;
+      border: none;
+      padding: 10px;
+      width: 100%;
+      border-radius: 4px;
+      font-weight: 600;
+      margin-top: 10px;
+      cursor: pointer;
+    }
+    .login-form a {
+      color: #ff9500;
+      text-decoration: none;
+      font-size: 0.9rem;
+      display: inline-block;
+      margin-top: 8px;
+    }
+  </style>
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="logo">GST</div>
+      <div class="logo">
+        <img src="{{ url_for('static', filename='acer_logo.png') }}" alt="AcerGST Logo">
+      </div>
       <div class="title">Acer GST ↔ PR vs. 2B Reconciliation</div>
+    </div>
+    <div class="nav-menu">
+      {% if session.logged_in %}
+        <form method="POST" action="{{ url_for('logout') }}" style="display:inline;">
+          <button type="submit">Logout</button>
+        </form>
+        <a href="{{ url_for('subscribe') }}">Subscribe</a>
+      {% else %}
+        <a href="{{ url_for('login') }}">Login</a>
+        <a href="{{ url_for('subscribe') }}">Subscribe</a>
+      {% endif %}
     </div>
   </header>
 
@@ -25,15 +172,17 @@
       {% if messages %}
         <div class="flash">
           {% for msg in messages %}
-            <div class="flash-item">{{ msg }}</div>
+            <div class="flash-item" style="background:#ff950020; padding:10px; margin:10px 0; border-left:3px solid #ff9500;">{{ msg }}</div>
           {% endfor %}
         </div>
       {% endif %}
     {% endwith %}
-    {% block content %}{% endblock %}
+
+    {% block content %}
+    {% endblock %}
   </main>
 
-  <<footer class="footer">
+  <footer class="footer">
     <div>
       © {{ 2025 }} AcerGST • <span class="muted">All Rights Reserved</span> •
       <a href="mailto:info@acertax.com" class="muted">info@acertax.com</a>

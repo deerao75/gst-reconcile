@@ -392,6 +392,7 @@ def build_lookup(df_2b: pd.DataFrame, inv_col_2b: str, gstin_col_2b: str) -> Dic
         if gst and inv:
             lookup[concat_key(gst, inv)].append(idx)
     return lookup
+
 def reconcile(
     df_pr: pd.DataFrame, df_2b: pd.DataFrame,
     inv_col_pr: str, gstin_col_pr: str, date_col_pr: Optional[str], cgst_col_pr: Optional[str], sgst_col_pr: Optional[str], igst_col_pr: Optional[str],
@@ -403,11 +404,11 @@ def reconcile(
         gst_pr = clean_gstin(row.get(gstin_col_pr, ""))
         inv_pr = inv_basic(row.get(inv_col_pr, ""))
         if not gst_pr or not inv_pr:
-            mappings.append("not matched"); remarks.append("no GSTIN+Invoice in PR"); reasons.append("missing GSTIN/Invoice in PR"); continue
+            mappings.append("Not Matched"); remarks.append("no GSTIN+Invoice in PR"); reasons.append("missing GSTIN/Invoice in PR"); continue
         key = concat_key(gst_pr, inv_pr)
         cand_idxs = b2_lookup.get(key, [])
         if not cand_idxs:
-            mappings.append("not matched"); remarks.append("no GSTIN+Invoice match"); reasons.append(""); continue
+            mappings.append("Not Matched"); remarks.append("no GSTIN+Invoice match"); reasons.append(""); continue
         idx2b = cand_idxs[0]
         row2b = df_2b.iloc[idx2b]
         mismatches = []
@@ -433,19 +434,20 @@ def reconcile(
             if len(cand_idxs) > 1:
                 extra.append(f"multiple matches in 2B ({len(cand_idxs)})")
             reasons.append("; ".join(mismatches + extra))
-            mappings.append("Almost Match")
+            mappings.append("Almost Matched")
         else:
             extra = []
             if len(cand_idxs) > 1:
                 extra.append(f"multiple matches in 2B ({len(cand_idxs)})")
             remarks.append("All fields matched" + ("" if not extra else f" ({'; '.join(extra)})"))
             reasons.append("")
-            mappings.append("matched")
+            mappings.append("Matched")
     out = df_pr.copy()
     out["Mapping"] = mappings
     out["Remarks"] = remarks
     out["Reason"] = reasons
     return out
+
 # -------------------- Pairwise combined output --------------------
 def build_pairwise_recon(
     df_pr: pd.DataFrame, df_2b: pd.DataFrame,
@@ -473,7 +475,6 @@ def build_pairwise_recon(
     # -------------------------------------------------------------------------------------
     # Column names used later
     inv_pr_col = f"{inv_pr}_PR" if inv_pr else None
-    gst_pr_col = f"{gst_pr}_PR" if inv_pr else None and f"{gst_pr}_PR"
     gst_pr_col = f"{gst_pr}_PR" if gst_pr else None
     inv_2b_col = f"{inv_2b}_2B" if inv_2b else None
     gst_2b_col = f"{gst_2b}_2B" if gst_2b else None
@@ -495,9 +496,9 @@ def build_pairwise_recon(
         pr_present = bool(pr_inv_val) or bool(pr_gst_val)
         b2_present = bool(b2_inv_val) or bool(b2_gst_val)
         if pr_present and not b2_present:
-            mapping.append("not matched"); remarks.append("missing in 2B"); reason.append(""); continue
+            mapping.append("Not Matched"); remarks.append("missing in 2B"); reason.append(""); continue
         if b2_present and not pr_present:
-            mapping.append("not matched"); remarks.append("missing in PR"); reason.append(""); continue
+            mapping.append("Not Matched"); remarks.append("missing in PR"); reason.append(""); continue
         mismatches = []
         if date_pr_col and date_2b_col:
             d_pr = parse_date_cell(r.get(date_pr_col, ""))
@@ -513,9 +514,9 @@ def build_pairwise_recon(
         if igst_pr_col and igst_2b_col and neq_round(r.get(igst_pr_col, 0), r.get(igst_2b_col, 0)):
             mismatches.append("IGST")
         if mismatches:
-            mapping.append("Almost Match"); remarks.append("mismatch"); reason.append("; ".join(mismatches))
+            mapping.append("Almost Matched"); remarks.append("mismatch"); reason.append("; ".join(mismatches))
         else:
-            mapping.append("matched"); remarks.append("All fields matched"); reason.append("")
+            mapping.append("Matched"); remarks.append("All fields matched"); reason.append("")
     out = merged.copy()
     out["Mapping"] = mapping
     out["Remarks"] = remarks
@@ -553,7 +554,16 @@ def build_pairwise_recon(
     keep_extra = [c for c in [vendor_name_pr, gstr1_status_2b] if c and c in out.columns]
     front = ["_GST_KEY", "_INV_KEY", "Mapping", "Remarks", "Reason"]
     final_cols = front + pair_cols + keep_extra
-    return out[final_cols], {
+    out = out[final_cols]
+
+    # ---------------- NEW: Correct "2B month" using GSTR-1 filing status (text, not number) ----------------
+    two_b_month_series = ""
+    if gstr1_status_2b and gstr1_status_2b in out.columns:
+        # Use the actual GSTR-1 filing status text (e.g., "Filed", "Not Filed", or tax period like "Jul 2024")
+        two_b_month_series = out[gstr1_status_2b]
+    out["2B month"] = two_b_month_series
+
+    return out, {
         "cgst_pr_col": cgst_pr_col, "sgst_pr_col": sgst_pr_col, "igst_pr_col": igst_pr_col,
         "cgst_2b_col": cgst_2b_col, "sgst_2b_col": sgst_2b_col, "igst_2b_col": igst_2b_col,
         "gstr1_status_2b_col": gstr1_status_2b  # <-- expose for "2B month"

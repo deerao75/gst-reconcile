@@ -15,44 +15,33 @@ from rq.job import Job
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-
 # -------------------- Flask & App Config --------------------
 app = Flask(__name__)
-
 # Use SECRET_KEY from environment (Render), fallback for local dev
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-for-local-use-only")
-
 # File upload limit
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB
-
 # Database: PostgreSQL on Render, SQLite locally
 database_url = os.environ.get("DATABASE_URL")
 if database_url:
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url.replace("postgres://", "postgresql://")
 else:
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///users.db"
-
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
 # ------- Initialize SQLAlchemy (for auth) -------
 from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy(app)
-
 # User Model (for login/subscribe)
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(200), nullable=False)
     subscribed = db.Column(db.Boolean, default=False)
-
     def __repr__(self):
         return f'<User {self.email}>'
-
 import threading
-
 _tables_created = False
 _tables_lock = threading.Lock()
-
 @app.before_request
 def create_tables_once():
     global _tables_created
@@ -61,23 +50,19 @@ def create_tables_once():
             if not _tables_created:
                 db.create_all()
                 _tables_created = True
-
 # ------- NEW: Redis Queue (for background jobs) -------
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 rconn = Redis.from_url(REDIS_URL)
 q = Queue("reconcile", connection=rconn)
-
 # ------- NEW: Google Drive service (service account) -------
 SCOPES = ['https://www.googleapis.com/auth/drive']
 SERVICE_ACCOUNT_FILE = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'cred.json')
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', None)
-
 def _drive_service():
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
-
 def upload_to_drive(local_path: str, filename: str) -> str:
     service = _drive_service()
     metadata = {'name': filename}
@@ -91,7 +76,6 @@ def upload_to_drive(local_path: str, filename: str) -> str:
         supportsAllDrives=True
     ).execute()
     return file.get('id')
-
 def download_from_drive(file_id: str, local_path: str):
     service = _drive_service()
     request = service.files().get_media(
@@ -103,11 +87,6 @@ def download_from_drive(file_id: str, local_path: str):
         done = False
         while not done:
             status, done = downloader.next_chunk()
-
-# -------------------- Column candidates --------------------
-# ... (ALL YOUR EXISTING COLUMN CANDIDATES AND HELPER FUNCTIONS REMAIN UNCHANGED) ...
-# [Paste all your existing code from "INVOICE_CANDIDATES_2B = [...]" down to just before the routes]
-
 # -------------------- Column candidates --------------------
 # GSTR-2B (flattened) candidates
 INVOICE_CANDIDATES_2B = [
@@ -392,7 +371,6 @@ def build_lookup(df_2b: pd.DataFrame, inv_col_2b: str, gstin_col_2b: str) -> Dic
         if gst and inv:
             lookup[concat_key(gst, inv)].append(idx)
     return lookup
-
 def reconcile(
     df_pr: pd.DataFrame, df_2b: pd.DataFrame,
     inv_col_pr: str, gstin_col_pr: str, date_col_pr: Optional[str], cgst_col_pr: Optional[str], sgst_col_pr: Optional[str], igst_col_pr: Optional[str],
@@ -447,7 +425,6 @@ def reconcile(
     out["Remarks"] = remarks
     out["Reason"] = reasons
     return out
-
 # -------------------- Pairwise combined output --------------------
 def build_pairwise_recon(
     df_pr: pd.DataFrame, df_2b: pd.DataFrame,
@@ -555,14 +532,12 @@ def build_pairwise_recon(
     front = ["_GST_KEY", "_INV_KEY", "Mapping", "Remarks", "Reason"]
     final_cols = front + pair_cols + keep_extra
     out = out[final_cols]
-
     # ---------------- NEW: Correct "2B month" using GSTR-1 filing status (text, not number) ----------------
     two_b_month_series = ""
     if gstr1_status_2b and gstr1_status_2b in out.columns:
         # Use the actual GSTR-1 filing status text (e.g., "Filed", "Not Filed", or tax period like "Jul 2024")
         two_b_month_series = out[gstr1_status_2b]
     out["2B month"] = two_b_month_series
-
     return out, {
         "cgst_pr_col": cgst_pr_col, "sgst_pr_col": sgst_pr_col, "igst_pr_col": igst_pr_col,
         "cgst_2b_col": cgst_2b_col, "sgst_2b_col": sgst_2b_col, "igst_2b_col": igst_2b_col,
@@ -571,40 +546,46 @@ def build_pairwise_recon(
 # -------------------- Dashboard --------------------
 def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
     status_col = "Mapping"
-    statuses = ["matched", "Almost Match", "not matched"]
-    def sum_by(status, colname):
-        if not colname or colname not in df_recon.columns:
-            return 0.0
-        mask = df_recon[status_col].str.lower().eq(status.lower())
-        return float(pd.to_numeric(df_recon.loc[mask, colname], errors="coerce").fillna(0).sum())
+    statuses = ["Matched", "Almost Matched", "Not Matched"]
+    def sum_pr(status):
+        total = 0.0
+        for col in [cols["cgst_pr_col"], cols["sgst_pr_col"], cols["igst_pr_col"]]:
+            if col and col in df_recon.columns:
+                mask = df_recon[status_col] == status
+                total += float(pd.to_numeric(df_recon.loc[mask, col], errors="coerce").fillna(0).sum())
+        return total
+    def sum_2b(status):
+        total = 0.0
+        for col in [cols["cgst_2b_col"], cols["sgst_2b_col"], cols["igst_2b_col"]]:
+            if col and col in df_recon.columns:
+                mask = df_recon[status_col] == status
+                total += float(pd.to_numeric(df_recon.loc[mask, col], errors="coerce").fillna(0).sum())
+        return total
     def count_by(status):
-        return int((df_recon[status_col].str.lower() == status.lower()).sum())
+        return int((df_recon[status_col] == status).sum())
     rows = []
     rows.append(["Count (rows)",
-                 count_by("matched"), count_by("Almost Match"), count_by("not matched")])
-    cgst_pr = [sum_by(s, cols["cgst_pr_col"]) for s in statuses]
-    sgst_pr = [sum_by(s, cols["sgst_pr_col"]) for s in statuses]
-    igst_pr = [sum_by(s, cols["igst_pr_col"]) for s in statuses]
-    total_pr = [a+b+c for a,b,c in zip(cgst_pr, sgst_pr, igst_pr)]
-    rows.append(["CGST (PR)"] + cgst_pr)
-    rows.append(["SGST (PR)"] + sgst_pr)
-    rows.append(["IGST (PR)"] + igst_pr)
-    rows.append(["Total Tax (PR)"] + total_pr)
-    cgst_2b = [sum_by(s, cols["cgst_2b_col"]) for s in statuses]
-    sgst_2b = [sum_by(s, cols["sgst_2b_col"]) for s in statuses]
-    igst_2b = [sum_by(s, cols["igst_2b_col"]) for s in statuses]
-    total_2b = [a+b+c for a,b,c in zip(cgst_2b, sgst_2b, igst_2b)]
-    rows.append(["CGST (2B)"] + cgst_2b)
-    rows.append(["SGST (2B)"] + sgst_2b)
-    rows.append(["IGST (2B)"] + igst_2b)
-    rows.append(["Total Tax (2B)"] + total_2b)
-    return pd.DataFrame(rows, columns=["Metric", "Matched", "Almost Match", "Not Matched"])
-
+                 count_by("Matched"), count_by("Almost Matched"), count_by("Not Matched")])
+    # Tax amounts
+    pr_matched = sum_pr("Matched")
+    pr_almost = sum_pr("Almost Matched")
+    pr_not = sum_pr("Not Matched")
+    pr_total = pr_matched + pr_almost + pr_not
+    rows.append(["Total Tax (PR)",
+                 pr_matched, pr_almost, pr_not, pr_total])
+    _2b_matched = sum_2b("Matched")
+    _2b_almost = sum_2b("Almost Matched")
+    _2b_not = sum_2b("Not Matched")
+    _2b_total = _2b_matched + _2b_almost + _2b_not
+    rows.append(["Total Tax (2B)",
+                 _2b_matched, _2b_almost, _2b_not, _2b_total])
+    # Build DataFrame with new layout
+    df = pd.DataFrame(rows, columns=["Metric", "Matched", "Almost Matched", "Not Matched", "Total"])
+    return df
 # -------------------- Routes --------------------
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html")
-
 @app.route("/verify", methods=["POST"])
 def verify_columns():
     file_2b = request.files.get("gstr2b")
@@ -621,6 +602,7 @@ def verify_columns():
     # Read B2B (required) and B2B-CDNR (optional) using headers in rows 5/6
     wanted_sheets = ["B2B", "B2B-CDNR"]
     frames = []
+    sheet_sources = []
     # Detect which of the wanted sheets exist
     xls = pd.ExcelFile(tmp2b.name)
     present_sheets = [sn for sn in wanted_sheets if sn in xls.sheet_names]
@@ -636,13 +618,41 @@ def verify_columns():
             continue
         df.columns = flatten_columns(df.columns)
         df, _ = normalize_columns(df)
+        # Mark source
+        df["_SOURCE_SHEET"] = sn
         frames.append(df)
+        sheet_sources.append(sn)
     if not frames:
         flash("Could not read valid data from the GSTR-2B file.")
         return redirect(url_for("index"))
     df_2b_raw = pd.concat(frames, ignore_index=True)
     df_pr_raw = pd.read_excel(tmppr.name)
     df_pr_raw, _ = normalize_columns(df_pr_raw)  # normalize PR headers
+    # ---------------- Apply sign logic for B2B-CDNR ----------------
+    def apply_signs(df):
+        if "_SOURCE_SHEET" not in df.columns:
+            return df
+        df = df.copy()
+        # Identify note type
+        def get_note_type(row):
+            inv = as_text(row.get(INVOICE_CANDIDATES_2B[0], "") if INVOICE_CANDIDATES_2B else "")
+            if "credit" in inv.lower() or "cr" in inv.lower():
+                return "credit"
+            if "debit" in inv.lower() or "dr" in inv.lower():
+                return "debit"
+            # Fallback: check sheet name
+            if row["_SOURCE_SHEET"] == "B2B-CDNR":
+                return "credit"  # CDNR is mostly credit notes
+            return "invoice"
+        df["_NOTE_TYPE"] = df.apply(get_note_type, axis=1)
+        # Flip sign for credit notes in numeric columns
+        numeric_cols = CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B + TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B + INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
+        numeric_cols = [c for c in numeric_cols if c in df.columns]
+        for col in numeric_cols:
+            df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
+        return df
+    df_2b_raw = apply_signs(df_2b_raw)
+    # Proceed with column detection
     inv_2b = _pick_column(df_2b_raw, INVOICE_CANDIDATES_2B)
     gst_2b = _pick_column(df_2b_raw, GSTIN_CANDIDATES_2B)
     date_2b = _pick_column(df_2b_raw, DATE_CANDIDATES_2B)
@@ -670,7 +680,6 @@ def verify_columns():
         inv_2b=inv_2b, gst_2b=gst_2b, date_2b=date_2b, cgst_2b=cgst_2b, sgst_2b=sgst_2b, igst_2b=igst_2b,
         inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr
     )
-
 # ------- Extracted heavy logic into a helper so the worker can call it -------
 def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                                  inv_2b_sel: str, gst_2b_sel: str, date_2b_sel: str, cgst_2b_sel: str, sgst_2b_sel: str, igst_2b_sel: str,
@@ -679,6 +688,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     # Read B2B (required) and B2B-CDNR (optional) using headers in rows 5/6
     wanted_sheets = ["B2B", "B2B-CDNR"]
     frames = []
+    sheet_sources = []
     # Detect which of the wanted sheets exist
     xls = pd.ExcelFile(tmp2b_path)
     present_sheets = [sn for sn in wanted_sheets if sn in xls.sheet_names]
@@ -693,12 +703,34 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             continue
         df.columns = flatten_columns(df.columns)
         df, _ = normalize_columns(df)
+        df["_SOURCE_SHEET"] = sn
         frames.append(df)
     if not frames:
         raise ValueError("Could not read valid data from the GSTR-2B file.")
     df_2b_raw = pd.concat(frames, ignore_index=True)
     df_pr_raw = pd.read_excel(tmppr_path)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)  # normalize PR headers, keep map
+    # ---------------- Apply sign logic for B2B-CDNR ----------------
+    def apply_signs(df):
+        if "_SOURCE_SHEET" not in df.columns:
+            return df
+        df = df.copy()
+        def get_note_type(row):
+            inv = as_text(row.get(INVOICE_CANDIDATES_2B[0], "") if INVOICE_CANDIDATES_2B else "")
+            if "credit" in inv.lower() or "cr" in inv.lower():
+                return "credit"
+            if "debit" in inv.lower() or "dr" in inv.lower():
+                return "debit"
+            if row["_SOURCE_SHEET"] == "B2B-CDNR":
+                return "credit"
+            return "invoice"
+        df["_NOTE_TYPE"] = df.apply(get_note_type, axis=1)
+        numeric_cols = CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B + TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B + INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
+        numeric_cols = [c for c in numeric_cols if c in df.columns]
+        for col in numeric_cols:
+            df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
+        return df
+    df_2b_raw = apply_signs(df_2b_raw)
     # ---- Robust fallback: normalized selection must match ANY header ----
     def match_provided(df: pd.DataFrame, provided: str) -> Optional[str]:
         if not provided:
@@ -835,12 +867,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         _autosize_ws(ws3, pr_comments)
     output.seek(0)
     return output.read()
-
 # ------- NEW: Background worker task (called by RQ) -------
 from rq import get_current_job
 import tempfile, os, time
 from concurrent.futures import ThreadPoolExecutor
-
 def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:
     """
     Faster version:
@@ -889,7 +919,6 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
         _mark(100, f"Done in {time.time()-t0:.1f}s")
         # Temp files are auto-removed with the TemporaryDirectory
     return {"result_drive_id": result_id}
-
 # -------------------- QUEUED confirm route + status + download --------------------
 @app.route("/reconcile_confirm", methods=["POST"])
 def reconcile_confirm():
@@ -932,7 +961,6 @@ def reconcile_confirm():
     )
     # Return a tiny progress page that polls /status and triggers /download when ready
     return render_template("progress.html", job_id=job.id)
-
 @app.route("/status/<job_id>", methods=["GET"])
 def status(job_id):
     job = Job.fetch(job_id, connection=rconn)
@@ -944,7 +972,6 @@ def status(job_id):
     elif state == "failed":
         payload["error"] = (job.exc_info or "")[-1000:]
     return jsonify(payload)
-
 @app.route("/download/<job_id>", methods=["GET"])
 def download(job_id):
     job = Job.fetch(job_id, connection=rconn)
@@ -963,8 +990,9 @@ def download(job_id):
             as_attachment=True,
             download_name="gstr2b_pr_reconciliation.xlsx"
         )
-
 # -------------------- Auth Routes (Login / Register / Subscribe) --------------------
+from werkzeug.security import check_password_hash, generate_password_hash
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -979,7 +1007,6 @@ def login():
         else:
             flash('Invalid email or password.')
     return render_template('login.html')
-
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -997,7 +1024,6 @@ def register():
             flash('Registration successful. Please log in.')
             return redirect(url_for('login'))
     return render_template('register.html')
-
 @app.route('/forgot_password', methods=['GET', 'POST'])
 def forgot_password():
     if request.method == 'POST':
@@ -1009,13 +1035,11 @@ def forgot_password():
         else:
             flash('Email not found.')
     return render_template('forgot_password.html')
-
 @app.route('/logout')
 def logout():
     session.clear()
     flash('Logged out.')
     return redirect(url_for('index'))
-
 @app.route('/subscribe', methods=['GET', 'POST'])
 def subscribe():
     if not session.get('logged_in'):
@@ -1033,6 +1057,5 @@ def subscribe():
         else:
             flash('Invalid plan selected.')
     return render_template('subscribe.html')
-
 if __name__ == "__main__":
     app.run(debug=True)

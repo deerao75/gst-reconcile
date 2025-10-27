@@ -563,24 +563,24 @@ def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> p
         return total
     def count_by(status):
         return int((df_recon[status_col] == status).sum())
-    rows = []
-    rows.append(["Count (rows)",
-                 count_by("Matched"), count_by("Almost Matched"), count_by("Not Matched")])
-    # Tax amounts
-    pr_matched = sum_pr("Matched")
-    pr_almost = sum_pr("Almost Matched")
-    pr_not = sum_pr("Not Matched")
-    pr_total = pr_matched + pr_almost + pr_not
-    rows.append(["Total Tax (PR)",
-                 pr_matched, pr_almost, pr_not, pr_total])
-    _2b_matched = sum_2b("Matched")
-    _2b_almost = sum_2b("Almost Matched")
-    _2b_not = sum_2b("Not Matched")
-    _2b_total = _2b_matched + _2b_almost + _2b_not
-    rows.append(["Total Tax (2B)",
-                 _2b_matched, _2b_almost, _2b_not, _2b_total])
-    # Build DataFrame with new layout
-    df = pd.DataFrame(rows, columns=["Metric", "Matched", "Almost Matched", "Not Matched", "Total"])
+
+    data = {
+        "Status": ["Count (rows)", "Total Tax (PR)", "Total Tax (2B)", "Total"],
+        "Matched (PR)": [count_by("Matched"), sum_pr("Matched"), 0, sum_pr("Matched")],
+        "Matched (2B)": [0, 0, sum_2b("Matched"), sum_2b("Matched")],
+        "Almost Matched (PR)": [count_by("Almost Matched"), sum_pr("Almost Matched"), 0, sum_pr("Almost Matched")],
+        "Almost Matched (2B)": [0, 0, sum_2b("Almost Matched"), sum_2b("Almost Matched")],
+        "Not Matched (PR)": [count_by("Not Matched"), sum_pr("Not Matched"), 0, sum_pr("Not Matched")],
+        "Not Matched (2B)": [0, 0, sum_2b("Not Matched"), sum_2b("Not Matched")],
+    }
+    df = pd.DataFrame(data)
+    # Fix "Total" row: sum across statuses
+    df.loc[df["Status"] == "Total", "Matched (PR)"] = sum_pr("Matched")
+    df.loc[df["Status"] == "Total", "Matched (2B)"] = sum_2b("Matched")
+    df.loc[df["Status"] == "Total", "Almost Matched (PR)"] = sum_pr("Almost Matched")
+    df.loc[df["Status"] == "Total", "Almost Matched (2B)"] = sum_2b("Almost Matched")
+    df.loc[df["Status"] == "Total", "Not Matched (PR)"] = sum_pr("Not Matched")
+    df.loc[df["Status"] == "Total", "Not Matched (2B)"] = sum_2b("Not Matched")
     return df
 # -------------------- Routes --------------------
 @app.route("/", methods=["GET"])
@@ -814,8 +814,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         pr_comments["Reason"] = ""
     # ---------------- Prepare Dashboard (transposed) ----------------
     dashboard_df = build_dashboard(combined_df, pair_cols)
-    dashboard_tx = dashboard_df.set_index("Metric").T.reset_index()
-    dashboard_tx.rename(columns={"index": "Status"}, inplace=True)
+    dashboard_tx = dashboard_df.set_index("Status").reset_index()
     # ---------------- Add extra columns to Reconciliation ----------------
     gstr1_col = pair_cols.get("gstr1_status_2b_col", None)
     two_b_month_series = combined_df[gstr1_col] if gstr1_col and gstr1_col in combined_df.columns else ""

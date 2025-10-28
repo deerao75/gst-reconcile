@@ -4,7 +4,7 @@
   <h2>Review Mapping Columns</h2>
   <p class="muted">
     We auto-detected the column headings used for reconciliation. <br>
-    Please <b>check</b> that the selections below correctly point to GSTIN, Invoice/Note Number, Date, CGST, SGST and IGST in each file.
+    Please <b>check</b> that the selections below correctly point to GSTIN, Invoice Number, Invoice Date, CGST, SGST and IGST in each file.
     If a heading looks wrong, choose the correct one from the dropdown before continuing.
   </p>
 
@@ -57,109 +57,51 @@
         </label>
       </div>
 
-      <!-- GSTR-2B: Tabs for B2B and B2B-CDNR -->
+      <!-- GSTR-2B -->
       <div class="verify-box">
-        <div class="tab-header">
-          <button type="button" class="tab-btn active" data-target="#tab-b2b">GSTR-2B (B2B)</button>
-          <button type="button" class="tab-btn" data-target="#tab-cdnr">GSTR-2B (B2B-CDNR)</button>
-        </div>
-
-        <!-- Tab: B2B (existing names preserved) -->
-        <div id="tab-b2b" class="tab-panel active">
-          <p class="tiny-muted">This controls mapping for the B2B sheet. (Existing behavior)</p>
-          <label>GSTIN
-            <select name="gst_2b">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == gst_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>Invoice Number
-            <select name="inv_2b">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == inv_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>Invoice Date
-            <select name="date_2b">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == date_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>CGST
-            <select name="cgst_2b">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == cgst_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>SGST
-            <select name="sgst_2b">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == sgst_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>IGST
-            <select name="igst_2b">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == igst_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-        </div>
-
-        <!-- Tab: B2B-CDNR (NEW, separate feature) -->
-        <div id="tab-cdnr" class="tab-panel">
-          <p class="tiny-muted">
-            This controls mapping for the <b>B2B-CDNR</b> sheet. Note/Invoice number here maps to PR’s Invoice Number, and
-            <em>Debit = positive</em>, <em>Credit = negative</em> (as per your logic).
-          </p>
-          <label>GSTIN (2B-CDNR)
-            <select name="gst_2b_cdnr">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == gst_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>Note Number (maps to PR Invoice Number)
-            <select name="inv_2b_cdnr">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == inv_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>Note Date
-            <select name="date_2b_cdnr">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == date_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>CGST
-            <select name="cgst_2b_cdnr">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == cgst_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>SGST
-            <select name="sgst_2b_cdnr">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == sgst_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>IGST
-            <select name="igst_2b_cdnr">
-              {% for c in cols_2b %}
-                <option value="{{ c }}" {% if c == igst_2b %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </label>
-        </div>
+        <h3>GSTR-2B</h3>
+        <label>GSTIN
+          <select name="gst_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == gst_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Invoice Number
+          <select name="inv_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == inv_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Invoice Date
+          <select name="date_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == date_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>CGST
+          <select name="cgst_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == cgst_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>SGST
+          <select name="sgst_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == sgst_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>IGST
+          <select name="igst_2b">
+            {% for c in cols_2b %}
+              <option value="{{ c }}" {% if c == igst_2b %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
       </div>
     </div>
 
@@ -211,34 +153,6 @@
   border: 1px solid #ccc;
   font-size: 0.95rem;
   background: #fafafa;
-}
-
-/* tabs */
-.tab-header {
-  display: flex;
-  gap: 0.5rem;
-  margin: -0.25rem 0 0.75rem 0;
-}
-.tab-btn {
-  border: 1px solid #ddd;
-  background: #f8f8f8;
-  padding: 0.4rem 0.75rem;
-  border-radius: 8px;
-  cursor: pointer;
-  font-weight: 600;
-}
-.tab-btn.active {
-  background: #ffefe1;
-  border-color: #ff7b00;
-  color: #c35600;
-}
-.tab-panel { display: none; }
-.tab-panel.active { display: block; }
-
-.tiny-muted {
-  margin: 0.25rem 0 0.5rem 0;
-  font-size: 0.85rem;
-  color: #666;
 }
 
 /* buttons aligned and visually consistent */
@@ -311,30 +225,12 @@
   color: #333;
   margin: 0;
 }
-
-@media (max-width: 980px) {
-  .verify-grid {
-    grid-template-columns: 1fr;
-  }
-}
 </style>
 
 <script>
 const form = document.getElementById('verifyForm');
 const overlay = document.getElementById('progressOverlay');
 const progressMsg = document.getElementById('progressMessage');
-
-// tabs
-const tabButtons = document.querySelectorAll('.tab-btn');
-const tabPanels  = document.querySelectorAll('.tab-panel');
-tabButtons.forEach(btn => {
-  btn.addEventListener('click', () => {
-    tabButtons.forEach(b => b.classList.remove('active'));
-    tabPanels.forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.querySelector(btn.dataset.target).classList.add('active');
-  });
-});
 
 form.addEventListener('submit', function() {
   overlay.style.display = 'flex';
@@ -343,6 +239,7 @@ form.addEventListener('submit', function() {
 
 // When file is downloaded, hide spinner and show success
 window.addEventListener('focus', function() {
+  // Once the download finishes and browser refocuses, update overlay
   if (overlay.style.display === 'flex') {
     document.querySelector('.loader').style.display = 'none';
     progressMsg.textContent = 'Reconciliation file downloaded successfully.';

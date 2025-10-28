@@ -98,14 +98,6 @@ INVOICE_CANDIDATES_2B = [
     "invoice", "invoice details inv no", "invoice details document number",
     "note no", "debit note no", "credit note no", "note number"
 ]
-# Strict list for CDNR note number
-CDNR_NOTE_CANDIDATES = [
-    "note number", "note no", "credit note number", "debit note number",
-    "note/refund voucher number", "refund voucher number", "ref voucher number",
-    "credit/debit note number", "debit/credit note number",
-    "document number", "cdnr document number"
-]
-
 GSTIN_CANDIDATES_2B = [
     "gstin of supplier", "supplier information gstin of supplier",
     "gstin", "gst no", "gst number", "gstn"
@@ -120,12 +112,6 @@ TAXABLE_CANDIDATES_2B = ["taxable value", "taxable amount", "assessable value", 
 TOTAL_TAX_CANDIDATES_2B = ["total tax", "total tax amount", "tax amount"]
 INVOICE_VALUE_CANDIDATES_2B = ["invoice value", "total invoice value", "value of invoice", "invoice total"]
 CESS_CANDIDATES_2B = ["cess", "cess amount"]
-
-# Vendor / Supplier name on 2B
-VENDOR_NAME_2B_CANDIDATES = [
-    "supplier legal name", "supplier trade name", "legal name of supplier", "trade name of supplier",
-    "supplier name", "name of supplier"
-]
 
 # Note type (for CDNR)
 NOTE_TYPE_CANDIDATES_2B = [
@@ -440,28 +426,6 @@ def build_pairwise_recon(
     igst_pr_col = f"{igst_pr}_PR" if igst_pr else None
     igst_2b_col = f"{igst_2b}_2B" if igst_2b else None
 
-    # Vendor name: pick from PR first; else fall back to 2B
-    def pick_from_list(columns, candidates):
-        cnorm = [_norm(c) for c in candidates]
-        best = None; best_score = -1
-        for col in columns:
-            n = _norm(col); score = 0
-            if any(n == c for c in cnorm): score += 4
-            if any(c in n for c in cnorm): score += 2
-            if "name" in n: score += 1
-            if score > best_score: best, best_score = col, score
-        return best if best_score > 0 else None
-
-    vendor_name_pr = pick_from_list(pr_cols_all, [f"{x}_PR" for x in VENDOR_NAME_PR_CANDIDATES])
-    vendor_name_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in VENDOR_NAME_2B_CANDIDATES])
-    vendor_name_col = vendor_name_pr or vendor_name_2b
-
-    gstr1_status_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in GSTR1_STATUS_2B_CANDIDATES])
-
-    # Choose taxable columns (PR & 2B)
-    taxable_pr_col = pick_from_list(pr_cols_all, [f"{x}_PR" for x in TAXABLE_CANDIDATES_PR])
-    taxable_2b_col = pick_from_list(b2_cols_all, [f"{x}_2B" for x in TAXABLE_CANDIDATES_2B])
-
     mapping, remarks, reason = [], [], []
     for _, r in merged.iterrows():
         pr_inv_val = as_text(r.get(inv_pr_col, "")) if inv_pr_col in merged.columns else ""
@@ -504,92 +468,40 @@ def build_pairwise_recon(
     out["Remarks"] = remarks
     out["Reason"] = reason
 
-    # If PR Invoice empty, copy unified key for display
     if inv_pr_col in out.columns:
         out[inv_pr_col] = out[inv_pr_col].map(as_text)
         mask_fix = (out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())
         out.loc[mask_fix, inv_pr_col] = out.loc[mask_fix, "_INV_KEY"]
 
-    # 2B month column
-    out["2B month"] = out.get(gstr1_status_2b, "")
+    # enrich (optional)
+    def pick_from_list(columns, candidates):
+        cnorm = [_norm(c) for c in candidates]
+        best = None; best_score = -1
+        for col in columns:
+            n = _norm(col); score = 0
+            if any(n == c for c in cnorm): score += 4
+            if any(c in n for c in cnorm): score += 2
+            if "name" in n: score += 1
+            if score > best_score: best, best_score = col, score
+        return best if best_score > 0 else None
 
-    # Build "Vendor name" column (prefer PR)
-    out["Vendor name"] = ""
-    if vendor_name_pr and vendor_name_pr in out.columns:
-        out["Vendor name"] = out[vendor_name_pr]
-    elif vendor_name_2b and vendor_name_2b in out.columns:
-        out["Vendor name"] = out[vendor_name_2b]
+    pr_cols_all = [c for c in out.columns if c.endswith("_PR")]
+    b2_cols_all = [c for c in out.columns if c.endswith("_2B")]
+    vendor_name_pr = pick_from_list(pr_cols_all, [f"{x}_PR" for x in VENDOR_NAME_PR_CANDIDATES])
+    gstr1_status_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in GSTR1_STATUS_2B_CANDIDATES])
 
-    # Eligibility & User Remarks (blank)
-    out["Eligibility"] = ""
-    out["User Remarks"] = ""
-
-    # Compute Taxable Value per rule
-    def _pick_taxable(row):
-        mapv = row.get("Mapping", "")
-        remv = row.get("Remarks", "")
-        pr_v = row.get(taxable_pr_col, 0) if taxable_pr_col in out.columns else 0
-        b2_v = row.get(taxable_2b_col, 0) if taxable_2b_col in out.columns else 0
-        pr_v = parse_amount(pr_v); b2_v = parse_amount(b2_v)
-        if mapv == "Not Matched" and str(remv).strip().lower() == "missing in pr":
-            return b2_v
-        return pr_v
-    out["Taxable Value"] = out.apply(_pick_taxable, axis=1)
-
-    # Compose final column order (rename friendly aliases for required fields)
-    # Map the GSTIN/Invoice/Date/tax columns if present; if missing, create blanks to keep order stable
-    def _mk(col_name):
-        return col_name if (col_name and col_name in out.columns) else None
-
-    cols_final = [
-        "_GST_KEY",                 # GST Key
-        "_INV_KEY",                 # Inv Key (also Note No for CDNR)
-        "Vendor name",              # Vendor
-        "Mapping", "Remarks", "Reason",
-        _mk(gst_pr_col),            # GSTIN PR
-        _mk(gst_2b_col),            # GSTIN 2B
-        _mk(gst_pr_col),            # GSTIN Supplier PR (same as GSTIN PR)
-        _mk(gst_2b_col),            # GSTIN Supplier 2B (same as GSTIN 2B)
-        _mk(inv_pr_col),            # Invoice Number PR
-        _mk(inv_2b_col),            # Invoice Number 2B
-        _mk(date_pr_col),           # Invoice Date PR
-        _mk(date_2b_col),           # Invoice Date 2B
-        _mk(cgst_pr_col),           # CGST Amount PR
-        _mk(cgst_2b_col),           # CGST Amount 2B
-        _mk(sgst_pr_col),           # SGST Amount PR
-        _mk(sgst_2b_col),           # SGST Amount 2B
-        _mk(igst_pr_col),           # IGST Amount PR
-        _mk(igst_2b_col),           # IGST Amount 2B
-        "Taxable Value",            # Derived
-        "2B month",
-        "Eligibility",
-        "User Remarks",
+    pair_cols = [
+        gst_pr_col, gst_2b_col, inv_pr_col, inv_2b_col, date_pr_col, date_2b_col,
+        cgst_pr_col, cgst_2b_col, sgst_pr_col, sgst_2b_col, igst_pr_col, igst_2b_col,
     ]
-    # create blanks for any None columns to preserve order
-    final_cols = []
-    for c in cols_final:
-        if c and c in out.columns:
-            final_cols.append(c)
-        else:
-            # ensure a blank placeholder
-            tmp = f"__blank_{len(final_cols)}"
-            out[tmp] = ""
-            final_cols.append(tmp)
+    pair_cols = [c for c in pair_cols if c and c in out.columns]
+    keep_extra = [c for c in [vendor_name_pr, gstr1_status_2b] if c and c in out.columns]
 
+    front = ["_GST_KEY", "_INV_KEY", "Mapping", "Remarks", "Reason"]
+    final_cols = front + pair_cols + keep_extra
     out = out[final_cols]
 
-    # Totals row at the end (sum numeric columns)
-    numeric_like = []
-    for cname in final_cols:
-        n = _norm(cname)
-        if any(k in n for k in ["cgst", "sgst", "igst", "taxable"]):
-            numeric_like.append(cname)
-    totals = {c: "" for c in final_cols}
-    totals["_GST_KEY" if "_GST_KEY" in out.columns else final_cols[0]] = "TOTAL"
-    for c in numeric_like:
-        totals[c] = float(pd.to_numeric(out[c], errors="coerce").fillna(0).sum())
-    out = pd.concat([out, pd.DataFrame([totals])], ignore_index=True)
-
+    out["2B month"] = out.get(gstr1_status_2b, "")
     return out, {
         "cgst_pr_col": cgst_pr_col, "sgst_pr_col": sgst_pr_col, "igst_pr_col": igst_pr_col,
         "cgst_2b_col": cgst_2b_col, "sgst_2b_col": sgst_2b_col, "igst_2b_col": igst_2b_col,
@@ -601,61 +513,41 @@ def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> p
     status_col = "Mapping"
     statuses = ["Matched", "Almost Matched", "Not Matched"]
 
-    cgst_pr = cols.get("cgst_pr_col"); sgst_pr = cols.get("sgst_pr_col"); igst_pr = cols.get("igst_pr_col")
-    cgst_2b = cols.get("cgst_2b_col"); sgst_2b = cols.get("sgst_2b_col"); igst_2b = cols.get("igst_2b_col")
+    def sum_pr(status):
+        total = 0.0
+        for col in [cols["cgst_pr_col"], cols["sgst_pr_col"], cols["igst_pr_col"]]:
+            if col and col in df_recon.columns:
+                mask = df_recon[status_col] == status
+                total += float(pd.to_numeric(df_recon.loc[mask, col], errors="coerce").fillna(0).sum())
+        return total
 
-    def _sum(col, mask):
-        if col and col in df_recon.columns:
-            return float(pd.to_numeric(df_recon.loc[mask, col], errors="coerce").fillna(0).sum())
-        return 0.0
+    def sum_2b(status):
+        total = 0.0
+        for col in [cols["cgst_2b_col"], cols["sgst_2b_col"], cols["igst_2b_col"]]:
+            if col and col in df_recon.columns:
+                mask = df_recon[status_col] == status
+                total += float(pd.to_numeric(df_recon.loc[mask, col], errors="coerce").fillna(0).sum())
+        return total
 
-    def _row(tax):
-        if tax == "CGST":
-            prcol, b2col = cgst_pr, cgst_2b
-        elif tax == "SGST":
-            prcol, b2col = sgst_pr, sgst_2b
-        elif tax == "IGST":
-            prcol, b2col = igst_pr, igst_2b
-        else:
-            # total across all three
-            def _sum_multi(mask, which):
-                cols = [cgst_pr, sgst_pr, igst_pr] if which == "PR" else [cgst_2b, sgst_2b, igst_2b]
-                v = 0.0
-                for c in cols:
-                    v += _sum(c, mask)
-                return v
-            m = {}
-            for st in statuses:
-                mask = (df_recon[status_col] == st)
-                m[f"{st} (PR)"] = _sum_multi(mask, "PR")
-                m[f"{st} (2B)"] = _sum_multi(mask, "2B")
-            # totals
-            mask_all = df_recon[status_col].isin(statuses)
-            m["Total (PR)"] = _sum_multi(mask_all, "PR")
-            m["Total (2B)"] = _sum_multi(mask_all, "2B")
-            m["Tax Type"] = "Total"
-            return m
+    def count_by(status):
+        return int((df_recon[status_col] == status).sum())
 
-        m = {}
-        for st in statuses:
-            mask = (df_recon[status_col] == st)
-            m[f"{st} (PR)"] = _sum(prcol, mask)
-            m[f"{st} (2B)"] = _sum(b2col, mask)
-        mask_all = df_recon[status_col].isin(statuses)
-        m["Total (PR)"] = _sum(prcol, mask_all)
-        m["Total (2B)"] = _sum(b2col, mask_all)
-        m["Tax Type"] = tax
-        return m
-
-    rows = [_row("CGST"), _row("SGST"), _row("IGST"), _row("Total")]
-    df = pd.DataFrame(rows)[[
-        "Tax Type",
-        "Matched (PR)", "Matched (2B)",
-        "Almost Matched (PR)", "Almost Matched (2B)",
-        "Not Matched (PR)", "Not Matched (2B)",
-        "Total (PR)", "Total (2B)"
-    ]]
-
+    data = {
+        "Status": ["Count (rows)", "Total Tax (PR)", "Total Tax (2B)", "Total"],
+        "Matched (PR)": [count_by("Matched"), sum_pr("Matched"), 0, sum_pr("Matched")],
+        "Matched (2B)": [0, 0, sum_2b("Matched"), sum_2b("Matched")],
+        "Almost Matched (PR)": [count_by("Almost Matched"), sum_pr("Almost Matched"), 0, sum_pr("Almost Matched")],
+        "Almost Matched (2B)": [0, 0, sum_2b("Almost Matched"), sum_2b("Almost Matched")],
+        "Not Matched (PR)": [count_by("Not Matched"), sum_pr("Not Matched"), 0, sum_pr("Not Matched")],
+        "Not Matched (2B)": [0, 0, sum_2b("Not Matched"), sum_2b("Not Matched")],
+    }
+    df = pd.DataFrame(data)
+    df.loc[df["Status"] == "Total", "Matched (PR)"] = sum_pr("Matched")
+    df.loc[df["Status"] == "Total", "Matched (2B)"] = sum_2b("Matched")
+    df.loc[df["Status"] == "Total", "Almost Matched (PR)"] = sum_pr("Almost Matched")
+    df.loc[df["Status"] == "Total", "Almost Matched (2B)"] = sum_2b("Almost Matched")
+    df.loc[df["Status"] == "Total", "Not Matched (PR)"] = sum_pr("Not Matched")
+    df.loc[df["Status"] == "Total", "Not Matched (2B)"] = sum_2b("Not Matched")
     return df
 
 # -------------------- Routes --------------------
@@ -770,6 +662,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         for c in df.columns:
             if _softnorm(c) == p:
                 return c
+        # (for PR we kept the map; for 2B it's same columns already)
         return None
 
     def ensure_col(df, provided, candidates, avoid=None, penalties=None):
@@ -797,16 +690,11 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     # ---- Select columns: CDNR (2B)  [NOTE NUMBER MUST BE USED] ----
     gst_2b_cdnr = ensure_col(df_cdnr_raw, gst_2b_cdnr_sel, GSTIN_CANDIDATES_2B)
-    inv_2b_cdnr = ensure_col(df_cdnr_raw, inv_2b_cdnr_sel, CDNR_NOTE_CANDIDATES)
-    if not inv_2b_cdnr:
-        inv_2b_cdnr = ensure_col(df_cdnr_raw, "", INVOICE_CANDIDATES_2B)
+    inv_2b_cdnr = ensure_col(df_cdnr_raw, inv_2b_cdnr_sel, INVOICE_CANDIDATES_2B)  # should be "Note Number"
     date_2b_cdnr = ensure_col(df_cdnr_raw, date_2b_cdnr_sel, DATE_CANDIDATES_2B)
     cgst_2b_cdnr = ensure_col(df_cdnr_raw, cgst_2b_cdnr_sel, CGST_CANDIDATES_2B)
     sgst_2b_cdnr = ensure_col(df_cdnr_raw, sgst_2b_cdnr_sel, SGST_CANDIDATES_2B)
     igst_2b_cdnr = ensure_col(df_cdnr_raw, igst_2b_cdnr_sel, IGST_CANDIDATES_2B)
-
-    if not df_cdnr_raw.empty and not inv_2b_cdnr:
-        raise ValueError("B2B-CDNR: Could not detect the 'Note Number' column. Please select it in Verify.")
 
     # ---- Apply CDNR signs (Debit +, Credit -) BEFORE consolidation ----
     def detect_note_type_col(df: pd.DataFrame) -> Optional[str]:
@@ -845,17 +733,11 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
         df["_NOTE_TYPE"] = df.apply(get_note_type, axis=1)
 
-        # robust numeric pick
-        candidate_pools = (
+        numeric_cols = [c for c in (
             CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B +
             TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B +
             INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
-        )
-        numeric_cols = []
-        for col in df.columns:
-            ncol = _norm(col)
-            if any(_norm(t) in ncol for t in candidate_pools):
-                numeric_cols.append(col)
+        ) if c in df.columns]
 
         for col in numeric_cols:
             df[col] = df.apply(
@@ -867,12 +749,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     if not df_cdnr_raw.empty:
         inv_guess_for_type = inv_2b_cdnr or _pick_column(df_cdnr_raw, INVOICE_CANDIDATES_2B)
         df_cdnr_raw = apply_cdnr_signs(df_cdnr_raw, inv_guess_for_type)
-
-    # Harmonize display for CDNR: show Note Number under same 2B invoice header if both exist
-    inv_2b_cdnr_for_key = inv_2b_cdnr
-    if not df_cdnr_raw.empty and inv_2b and inv_2b_cdnr and inv_2b != inv_2b_cdnr and inv_2b in df_cdnr_raw.columns:
-        df_cdnr_raw[inv_2b] = df_cdnr_raw[inv_2b_cdnr]
-        inv_2b_cdnr_for_key = inv_2b
 
     # ---- Consolidate note-wise (CDNR) and invoice-wise (B2B) ----
     def opt_numeric(df, base_must_cols):
@@ -894,9 +770,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         df_2b_b2b = consolidate_by_key(df_b2b_raw, gst_2b, inv_2b, date_2b, num_b2b)
         df_2b = df_2b_b2b
 
-    if not df_cdnr_raw.empty and gst_2b_cdnr and inv_2b_cdnr_for_key:
+    if not df_cdnr_raw.empty and gst_2b_cdnr and inv_2b_cdnr:
         num_cdnr = opt_numeric(df_cdnr_raw, [cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr])
-        df_2b_cdnr = consolidate_by_key(df_cdnr_raw, gst_2b_cdnr, inv_2b_cdnr_for_key, date_2b_cdnr, num_cdnr)
+        df_2b_cdnr = consolidate_by_key(df_cdnr_raw, gst_2b_cdnr, inv_2b_cdnr, date_2b_cdnr, num_cdnr)
         df_2b = pd.concat([df_2b, df_2b_cdnr], ignore_index=True) if not df_2b.empty else df_2b_cdnr
 
     # ---- Consolidate PR ----
@@ -912,7 +788,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     # ---- Build pairwise table and dashboard ----
     # We pass "2B" column names for display; they can belong to either B2B or CDNR, but the merge uses keys.
-    disp_inv_2b = inv_2b if inv_2b else inv_2b_cdnr_for_key
+    disp_inv_2b = inv_2b if inv_2b else inv_2b_cdnr
     disp_gst_2b = gst_2b if gst_2b else gst_2b_cdnr
     disp_date_2b = date_2b if date_2b else date_2b_cdnr
     disp_cgst_2b = cgst_2b if cgst_2b else cgst_2b_cdnr
@@ -926,6 +802,11 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     )
 
     dashboard_df = build_dashboard(combined_df, pair_cols)
+    dashboard_tx = dashboard_df.set_index("Status").reset_index()
+
+    combined_df["2B month"] = combined_df.get(pair_cols.get("gstr1_status_2b_col", ""), "")
+    combined_df["Eligibility"] = ""
+    combined_df["User Remarks"] = ""
 
     # ---- Write Excel ----
     def _autosize_ws(ws, df, min_w=12, max_w=48):
@@ -949,7 +830,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         wb = writer.book
         header_fmt = wb.add_format({"bold": True})
 
-        # Reconciliation sheet
         combined_df.to_excel(writer, index=False, sheet_name="Reconciliation")
         ws = writer.sheets["Reconciliation"]
         ws.freeze_panes(1, 0)
@@ -957,50 +837,20 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         ws.set_row(0, None, header_fmt)
         _autosize_ws(ws, combined_df)
 
-        # Dashboard sheet (main table)
-        dashboard_df.to_excel(writer, index=False, sheet_name="Dashboard")
+        dashboard_tx.to_excel(writer, index=False, sheet_name="Dashboard")
         ws2 = writer.sheets["Dashboard"]
         ws2.freeze_panes(1, 0)
-        ws2.autofilter(0, 0, len(dashboard_df), max(0, dashboard_df.shape[1] - 1))
+        ws2.autofilter(0, 0, len(dashboard_tx), max(0, dashboard_tx.shape[1] - 1))
         ws2.set_row(0, None, header_fmt)
-        _autosize_ws(ws2, dashboard_df, min_w=14)
+        _autosize_ws(ws2, dashboard_tx, min_w=14)
 
-        # Totals check table (below)
-        # Sum PR & 2B across CGST/SGST/IGST from reconciliation to verify tie-out
-        def _colsum(name):
-            return float(pd.to_numeric(combined_df.get(name, 0), errors="coerce").fillna(0).sum())
-
-        check_data = {
-            "Measure": ["Reconciliation Total (PR)", "Reconciliation Total (2B)"],
-            "CGST": [
-                _colsum(pair_cols.get("cgst_pr_col", "")),
-                _colsum(pair_cols.get("cgst_2b_col", "")),
-            ],
-            "SGST": [
-                _colsum(pair_cols.get("sgst_pr_col", "")),
-                _colsum(pair_cols.get("sgst_2b_col", "")),
-            ],
-            "IGST": [
-                _colsum(pair_cols.get("igst_pr_col", "")),
-                _colsum(pair_cols.get("igst_2b_col", "")),
-            ],
-        }
-        check_df = pd.DataFrame(check_data)
-        startrow = len(dashboard_df) + 3
-        check_df.to_excel(writer, index=False, sheet_name="Dashboard", startrow=startrow)
-        # format the second table header
-        ws2.write(startrow, 0, "Measure", header_fmt)
-        ws2.write(startrow, 1, "CGST", header_fmt)
-        ws2.write(startrow, 2, "SGST", header_fmt)
-        ws2.write(startrow, 3, "IGST", header_fmt)
-
-        # PR - Comments (unchanged logic, but preserves Mapping/Remarks/Reason)
+        # PR - Comments (same behavior as before)
         recon_lookup = {}
         for _, row in combined_df.iterrows():
             key = (as_text(row.get("_GST_KEY", "")), as_text(row.get("_INV_KEY", "")))
             recon_lookup[key] = (row.get("Mapping", ""), row.get("Remarks", ""), row.get("Reason", ""))
 
-        pr_comments = df_pr.copy()
+        pr_comments = df_pr_raw.copy()
         if gst_pr in pr_comments.columns and inv_pr in pr_comments.columns:
             pr_comments["_GST_KEY"] = pr_comments[gst_pr].map(clean_gstin)
             pr_comments["_INV_KEY"] = pr_comments[inv_pr].map(inv_basic)
@@ -1096,7 +946,7 @@ def reconcile_confirm():
         "sgst_2b": (request.form.get("sgst_2b") or "").strip(),
         "igst_2b": (request.form.get("igst_2b") or "").strip(),
 
-        # NEW: CDNR (2B) — these are honored by the pipeline
+        # NEW: CDNR (2B)
         "inv_2b_cdnr": (request.form.get("inv_2b_cdnr") or "").strip(),
         "gst_2b_cdnr": (request.form.get("gst_2b_cdnr") or "").strip(),
         "date_2b_cdnr": (request.form.get("date_2b_cdnr") or "").strip(),

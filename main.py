@@ -762,6 +762,50 @@ def verify_columns():
     )
 
 # ------- Extracted heavy logic into a helper so the worker can call it -------
+
+def _pick_best_note_col(df: pd.DataFrame, primary: Optional[str]) -> Optional[str]:
+    """
+    For CDNR: if the primary note column is missing or >70% blank, pick a better one
+    from NOTE_NO_CANDIDATES_2B (first non-empty-heavy column wins).
+    """
+    if df is None or df.empty:
+        return primary
+    def non_empty_ratio(col):
+        if col not in df.columns: return 0.0
+        s = df[col].astype(str).str.strip()
+        return (s != "").mean()
+    # if primary is weak, try alternatives
+    if (not primary) or (non_empty_ratio(primary) < 0.30):
+        best_col, best_score = None, 0.0
+        for c in NOTE_NO_CANDIDATES_2B:
+            if c in df.columns:
+                sc = non_empty_ratio(c)
+                if sc > best_score:
+                    best_col, best_score = c, sc
+        return best_col or primary
+    return primary
+
+def _rescue_empty_inv_keys(df: pd.DataFrame, inv_col: str) -> pd.DataFrame:
+    """
+    After consolidate_by_key, ensure _INV_KEY is not empty for CDNR rows.
+    - If empty, rebuild _INV_KEY from inv_col raw text
+    - If still empty, assign a row-unique placeholder to prevent GSTIN-level collapse.
+    """
+    if df.empty or inv_col not in df.columns:
+        return df
+    df = df.copy()
+    # Re-derive from raw
+    mask_empty = df["_INV_KEY"].astype(str).eq("")
+    if mask_empty.any():
+        df.loc[mask_empty, "_INV_KEY"] = df.loc[mask_empty, inv_col].map(lambda x: inv_basic(x))
+    # Still empty? give a stable unique token per row to avoid collapsing
+    mask_empty2 = df["_INV_KEY"].astype(str).eq("")
+    if mask_empty2.any():
+        df.loc[mask_empty2, "_INV_KEY"] = df.loc[mask_empty2].index.map(lambda i: f"__CDNR_ROW__{i}__")
+    return df
+
+
+
 def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                                  # B2B (invoice-based)
                                  inv_2b_b2b_sel: str, gst_2b_b2b_sel: str, date_2b_b2b_sel: str, cgst_2b_b2b_sel: str, sgst_2b_b2b_sel: str, igst_2b_b2b_sel: str,
@@ -852,6 +896,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     # --- Resolve columns for CDNR (note-based) ---
     note_2b_cdnr = ensure_col(df_cdnr_raw, note_2b_cdnr_sel, NOTE_NO_CANDIDATES_2B)
     notedate_2b_cdnr = ensure_col(df_cdnr_raw, notedate_2b_cdnr_sel, NOTE_DATE_CANDIDATES_2B)
+    # Harden selection: pick a better note column if the chosen one is mostly blank
+    note_2b_cdnr = _pick_best_note_col(df_cdnr_raw, note_2b_cdnr)
     gst_2b_cdnr = ensure_col(df_cdnr_raw, gst_2b_cdnr_sel, GSTIN_CANDIDATES_2B)
     cgst_2b_cdnr = ensure_col(df_cdnr_raw, cgst_2b_cdnr_sel, CGST_CANDIDATES_2B)
     sgst_2b_cdnr = ensure_col(df_cdnr_raw, sgst_2b_cdnr_sel, SGST_CANDIDATES_2B)
@@ -898,6 +944,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     #   • CDNR: GSTIN + Note Number
     df_2b_b2b = consolidate_by_key(df=df_b2b_raw, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b, date_col=date_2b_b2b, numeric_cols=opt_2b_b2b) if (df_b2b_raw is not None and not df_b2b_raw.empty and inv_2b_b2b and gst_2b_b2b) else pd.DataFrame()
     df_2b_cdnr = consolidate_by_key(df=df_cdnr_raw, gstin_col=gst_2b_cdnr, inv_col=note_2b_cdnr, date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr) if (df_cdnr_raw is not None and not df_cdnr_raw.empty and note_2b_cdnr and gst_2b_cdnr) else pd.DataFrame()
+    # Ensure CDNR has non-empty _INV_KEY (Note Number) so it never collapses at GSTIN level
+    if not df_2b_cdnr.empty:
+        df_2b_cdnr = _rescue_empty_inv_keys(df_2b_cdnr, inv_col=note_2b_cdnr)
     df_pr = consolidate_by_key(df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr, date_col=date_pr, numeric_cols=opt_pr)
 
     # Create display columns so that:

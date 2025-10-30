@@ -885,6 +885,17 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                 return guess
         return None
 
+    # ---------- NEW: hard-pick CDNR note/dated columns by substring match ----------
+    def _pick_col_contains(df, pattern):
+        pat = re.compile(pattern, re.I)
+        for c in (df.columns if df is not None else []):
+            if pat.search(str(c)):
+                return c
+        return None
+    cdnr_note_hard  = _pick_col_contains(df_cdnr_raw,  r"\bnote\s*number\b")
+    cdnr_ndate_hard = _pick_col_contains(df_cdnr_raw,  r"\bnote\s*date\b")
+    # -------------------------------------------------------------------------------
+
     # --- Resolve columns for B2B (invoice-based) ---
     inv_2b_b2b = ensure_col(df_b2b_raw, inv_2b_b2b_sel, INVOICE_CANDIDATES_2B)
     gst_2b_b2b = ensure_col(df_b2b_raw, gst_2b_b2b_sel, GSTIN_CANDIDATES_2B)
@@ -894,27 +905,20 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     igst_2b_b2b = ensure_col(df_b2b_raw, igst_2b_b2b_sel, IGST_CANDIDATES_2B)
 
     # --- Resolve columns for CDNR (note-based) ---
-    note_2b_cdnr = ensure_col(df_cdnr_raw, note_2b_cdnr_sel, NOTE_NO_CANDIDATES_2B)
+    note_2b_cdnr    = ensure_col(df_cdnr_raw, note_2b_cdnr_sel, NOTE_NO_CANDIDATES_2B)
     notedate_2b_cdnr = ensure_col(df_cdnr_raw, notedate_2b_cdnr_sel, NOTE_DATE_CANDIDATES_2B)
-    # Harden selection: pick a better note column if the chosen one is mostly blank
+
+    # ---------- NEW: prefer the hard-picked columns when present ----------
+    if cdnr_note_hard:   note_2b_cdnr    = cdnr_note_hard
+    if cdnr_ndate_hard:  notedate_2b_cdnr = cdnr_ndate_hard
+    # ---------- keep existing "best note col" rescue ----------
     note_2b_cdnr = _pick_best_note_col(df_cdnr_raw, note_2b_cdnr)
+    # ----------------------------------------------------------------------
+
     gst_2b_cdnr = ensure_col(df_cdnr_raw, gst_2b_cdnr_sel, GSTIN_CANDIDATES_2B)
     cgst_2b_cdnr = ensure_col(df_cdnr_raw, cgst_2b_cdnr_sel, CGST_CANDIDATES_2B)
     sgst_2b_cdnr = ensure_col(df_cdnr_raw, sgst_2b_cdnr_sel, SGST_CANDIDATES_2B)
     igst_2b_cdnr = ensure_col(df_cdnr_raw, igst_2b_cdnr_sel, IGST_CANDIDATES_2B)
-
-    # --- Resolve columns for PR ---
-    gst_pr = ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
-                        penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
-                        value_picker=lambda d: pick_gstin_by_values(d, prefer_supplier=True))
-    inv_pr = ensure_col(df_pr_raw, inv_pr_sel, INVOICE_CANDIDATES_PR,
-                        avoid=AVOID_DOC_LIKE_FOR_PR,
-                        penalties=["company", "recipient", "gstin"],
-                        value_picker=pick_invoice_by_values)
-    date_pr = ensure_col(df_pr_raw, date_pr_sel, DATE_CANDIDATES_PR)
-    cgst_pr = ensure_col(df_pr_raw, cgst_pr_sel, CGST_CANDIDATES_PR)
-    sgst_pr = ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
-    igst_pr = ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
 
     # Optional numeric columns (per sheet)
     def optional_numeric_list(df_):
@@ -944,9 +948,22 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     #   • CDNR: GSTIN + Note Number
     df_2b_b2b = consolidate_by_key(df=df_b2b_raw, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b, date_col=date_2b_b2b, numeric_cols=opt_2b_b2b) if (df_b2b_raw is not None and not df_b2b_raw.empty and inv_2b_b2b and gst_2b_b2b) else pd.DataFrame()
     df_2b_cdnr = consolidate_by_key(df=df_cdnr_raw, gstin_col=gst_2b_cdnr, inv_col=note_2b_cdnr, date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr) if (df_cdnr_raw is not None and not df_cdnr_raw.empty and note_2b_cdnr and gst_2b_cdnr) else pd.DataFrame()
+
     # Ensure CDNR has non-empty _INV_KEY (Note Number) so it never collapses at GSTIN level
     if not df_2b_cdnr.empty:
         df_2b_cdnr = _rescue_empty_inv_keys(df_2b_cdnr, inv_col=note_2b_cdnr)
+
+        # ---------- NEW: quick debug so you can verify in logs ----------
+        print("CDNR Note column picked:", note_2b_cdnr)
+        print("CDNR Note date column:", notedate_2b_cdnr)
+        pct_empty = (df_2b_cdnr["_INV_KEY"] == "").mean()
+        print(f"CDNR empty _INV_KEY %: {pct_empty:.2%}")
+        try:
+            print(df_2b_cdnr.head(5)[["_GST_KEY","_INV_KEY"]])
+        except Exception:
+            pass
+        # ---------------------------------------------------------------
+
     df_pr = consolidate_by_key(df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr, date_col=date_pr, numeric_cols=opt_pr)
 
     # Create display columns so that:

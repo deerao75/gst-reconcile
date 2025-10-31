@@ -614,10 +614,18 @@ def build_pairwise_recon(
     out = out[final_cols]
 
     # ---------------- "2B month" using GSTR-1 filing status text ----------------
-    two_b_month_series = ""
-    if gstr1_status_2b and gstr1_status_2b in out.columns:
-        two_b_month_series = out[gstr1_status_2b]
-    out["2B month"] = two_b_month_series
+    # ---------------- "2B month" using GSTR-1 filing status text (handle duplicates) ----------------
+    if gstr1_status_2b:
+        # There can be duplicate columns with the same name after merges; collect all and coalesce.
+        dup_cols = [c for c in out.columns if c == gstr1_status_2b]
+        if dup_cols:
+            # Always a DataFrame; pick the first non-null across duplicates
+            two_b_df = out.loc[:, dup_cols]
+            out["2B month"] = two_b_df.bfill(axis=1).iloc[:, 0]
+        else:
+            out["2B month"] = ""
+    else:
+        out["2B month"] = ""
 
     # For later use (dashboard + reconciliation build)
     return out, {

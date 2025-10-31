@@ -163,6 +163,10 @@ AVOID_RECIPIENT_GSTIN_FOR_PR = ["company gstin", "our gstin", "recipient gstin",
 VENDOR_NAME_PR_CANDIDATES = [
     "vendor name", "supplier name", "party name", "name of supplier", "vendor", "supplier"
 ]
+# NEW: try name-like fields in 2B too
+SUPPLIER_NAME_2B_CANDIDATES = [
+    "legal name of supplier", "trade name", "supplier name", "name of supplier", "party name", "seller name"
+]
 GSTR1_STATUS_2B_CANDIDATES = [
     "gstr-1 filing status", "gstr1 filing status", "filing status", "filing status details",
     "gstr1 status", "gstr-1 status", "status", "tax period", "return period"
@@ -565,9 +569,10 @@ def build_pairwise_recon(
             mapping.append("Matched"); remarks.append("All fields matched"); reason.append("")
 
     out = merged.copy()
-    out["Mapping"] = mapping
-    out["Remarks"] = remarks
-    out["Reason"] = reason
+    # ensure title case mapping (your request mentions first-letter caps)
+    out["Mapping"] = pd.Series(mapping, index=out.index).astype(str).str.title()
+    out["Remarks"]  = pd.Series(remarks, index=out.index)
+    out["Reason"]   = pd.Series(reason, index=out.index)
 
     # Fix PR invoice display if blank/zero
     if inv_pr_col in out.columns:
@@ -575,7 +580,7 @@ def build_pairwise_recon(
         mask_fix = (out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())
         out.loc[mask_fix, inv_pr_col] = out.loc[mask_fix, "_INV_KEY"]
 
-    # Detect Vendor Name (PR) and GSTR-1 Filing Status (2B)
+    # Detect Vendor/Supplier Name (PR and 2B) and GSTR-1 Filing Status (2B)
     def pick_from_list(columns, candidates):
         cnorm = [_norm(c) for c in candidates]
         best = None; best_score = -1
@@ -590,9 +595,10 @@ def build_pairwise_recon(
     pr_cols_all = [c for c in out.columns if c.endswith("_PR")]
     b2_cols_all = [c for c in out.columns if c.endswith("_2B")]
     vendor_name_pr = pick_from_list(pr_cols_all, [f"{x}_PR" for x in VENDOR_NAME_PR_CANDIDATES])
+    supplier_name_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in SUPPLIER_NAME_2B_CANDIDATES])
     gstr1_status_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in GSTR1_STATUS_2B_CANDIDATES])
 
-    # Order columns
+    # Order columns (internal)
     pair_cols = [
         gst_pr_col, gst_2b_col,
         inv_pr_col, inv_2b_col,
@@ -602,7 +608,7 @@ def build_pairwise_recon(
         igst_pr_col, igst_2b_col,
     ]
     pair_cols = [c for c in pair_cols if c and c in out.columns]
-    keep_extra = [c for c in [vendor_name_pr, gstr1_status_2b] if c and c in out.columns]
+    keep_extra = [c for c in [vendor_name_pr, supplier_name_2b, gstr1_status_2b] if c and c in out.columns]
     front = ["_GST_KEY", "_INV_KEY", "Mapping", "Remarks", "Reason"]
     final_cols = front + pair_cols + keep_extra
     out = out[final_cols]
@@ -612,55 +618,81 @@ def build_pairwise_recon(
     if gstr1_status_2b and gstr1_status_2b in out.columns:
         two_b_month_series = out[gstr1_status_2b]
     out["2B month"] = two_b_month_series
+
+    # For later use (dashboard + reconciliation build)
     return out, {
         "cgst_pr_col": cgst_pr_col, "sgst_pr_col": sgst_pr_col, "igst_pr_col": igst_pr_col,
         "cgst_2b_col": cgst_2b_col, "sgst_2b_col": sgst_2b_col, "igst_2b_col": igst_2b_col,
+        "gst_pr_col": gst_pr_col, "gst_2b_col": gst_2b_col,
+        "inv_pr_col": inv_pr_col, "inv_2b_col": inv_2b_col,
+        "date_pr_col": date_pr_col, "date_2b_col": date_2b_col,
+        "vendor_name_pr": vendor_name_pr, "supplier_name_2b": supplier_name_2b,
         "gstr1_status_2b_col": gstr1_status_2b
     }
 
-# -------------------- Dashboard --------------------
-def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
+# -------------------- Dashboard (NEW layout) --------------------
+def build_dashboard_v2(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
+    """
+    Rows: SGST, CGST, IGST, Total Tax Amount (INR)
+    Columns: Matched (PR, 2B), Almost Matched (PR, 2B), Not Matched (PR, 2B), Total (PR, 2B)
+    Values: sums by tax type & status.
+    """
     status_col = "Mapping"
     statuses = ["Matched", "Almost Matched", "Not Matched"]
 
-    def sum_pr(status):
-        total = 0.0
-        for col in [cols["cgst_pr_col"], cols["sgst_pr_col"], cols["igst_pr_col"]]:
-            if col and col in df_recon.columns:
-                mask = df_recon[status_col] == status
-                total += float(pd.to_numeric(df_recon.loc[mask, col], errors="coerce").fillna(0).sum())
-        return total
+    def sum_col_for_status(colname: Optional[str], status: str) -> float:
+        if not colname or colname not in df_recon.columns:
+            return 0.0
+        mask = df_recon[status_col] == status
+        return float(pd.to_numeric(df_recon.loc[mask, colname], errors="coerce").fillna(0).sum())
 
-    def sum_2b(status):
-        total = 0.0
-        for col in [cols["cgst_2b_col"], cols["sgst_2b_col"], cols["igst_2b_col"]]:
-            if col and col in df_recon.columns:
-                mask = df_recon[status_col] == status
-                total += float(pd.to_numeric(df_recon.loc[mask, col], errors="coerce").fillna(0).sum())
-        return total
+    def total_by_status_pr(status: str) -> float:
+        return (sum_col_for_status(cols["cgst_pr_col"], status) +
+                sum_col_for_status(cols["sgst_pr_col"], status) +
+                sum_col_for_status(cols["igst_pr_col"], status))
 
-    def count_by(status):
-        return int((df_recon[status_col] == status).sum())
+    def total_by_status_2b(status: str) -> float:
+        return (sum_col_for_status(cols["cgst_2b_col"], status) +
+                sum_col_for_status(cols["sgst_2b_col"], status) +
+                sum_col_for_status(cols["igst_2b_col"], status))
 
-    data = {
-        "Status": ["Count (rows)", "Total Tax (PR)", "Total Tax (2B)", "Total"],
-        "Matched (PR)": [count_by("Matched"), sum_pr("Matched"), 0, sum_pr("Matched")],
-        "Matched (2B)": [0, 0, sum_2b("Matched"), sum_2b("Matched")],
-        "Almost Matched (PR)": [count_by("Almost Matched"), sum_pr("Almost Matched"), 0, sum_pr("Almost Matched")],
-        "Almost Matched (2B)": [0, 0, sum_2b("Almost Matched"), sum_2b("Almost Matched")],
-        "Not Matched (PR)": [count_by("Not Matched"), sum_pr("Not Matched"), 0, sum_pr("Not Matched")],
-        "Not Matched (2B)": [0, 0, sum_2b("Not Matched"), sum_2b("Not Matched")],
-    }
-    df = pd.DataFrame(data)
+    rows = []
+    for tax_label, pr_col, b2_col in [
+        ("SGST", cols["sgst_pr_col"], cols["sgst_2b_col"]),
+        ("CGST", cols["cgst_pr_col"], cols["cgst_2b_col"]),
+        ("IGST", cols["igst_pr_col"], cols["igst_2b_col"]),
+    ]:
+        row = {"Type of Tax": tax_label}
+        # Matched/Almost/Not Matched buckets
+        for st in statuses:
+            row[f"{st} (PR)"] = sum_col_for_status(pr_col, st)
+            row[f"{st} (2B)"] = sum_col_for_status(b2_col, st)
+        # Totals
+        row["Total (PR)"] = sum_col_for_status(pr_col, "Matched") + \
+                            sum_col_for_status(pr_col, "Almost Matched") + \
+                            sum_col_for_status(pr_col, "Not Matched")
+        row["Total (2B)"] = sum_col_for_status(b2_col, "Matched") + \
+                            sum_col_for_status(b2_col, "Almost Matched") + \
+                            sum_col_for_status(b2_col, "Not Matched")
+        rows.append(row)
 
-    # Fix "Total" row: sum across statuses
-    df.loc[df["Status"] == "Total", "Matched (PR)"] = sum_pr("Matched")
-    df.loc[df["Status"] == "Total", "Matched (2B)"] = sum_2b("Matched")
-    df.loc[df["Status"] == "Total", "Almost Matched (PR)"] = sum_pr("Almost Matched")
-    df.loc[df["Status"] == "Total", "Almost Matched (2B)"] = sum_2b("Almost Matched")
-    df.loc[df["Status"] == "Total", "Not Matched (PR)"] = sum_pr("Not Matched")
-    df.loc[df["Status"] == "Total", "Not Matched (2B)"] = sum_2b("Not Matched")
-    return df
+    # Add Total Tax Amount (INR) row
+    total_row = {"Type of Tax": "Total Tax Amount (INR)"}
+    for st in statuses:
+        total_row[f"{st} (PR)"] = total_by_status_pr(st)
+        total_row[f"{st} (2B)"] = total_by_status_2b(st)
+    total_row["Total (PR)"] = total_by_status_pr("Matched") + total_by_status_pr("Almost Matched") + total_by_status_pr("Not Matched")
+    total_row["Total (2B)"] = total_by_status_2b("Matched") + total_by_status_2b("Almost Matched") + total_by_status_2b("Not Matched")
+    rows.append(total_row)
+
+    df = pd.DataFrame(rows)
+    # Order columns as requested buckets
+    desired_cols = ["Type of Tax",
+                    "Matched (PR)", "Matched (2B)",
+                    "Almost Matched (PR)", "Almost Matched (2B)",
+                    "Not Matched (PR)", "Not Matched (2B)",
+                    "Total (PR)", "Total (2B)"]
+    return df[desired_cols]
 
 # -------------------- Routes --------------------
 @app.route("/", methods=["GET"])
@@ -1032,9 +1064,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         recon_lookup[key] = (row.get("Mapping", ""), row.get("Remarks", ""), row.get("Reason", ""))
 
     pr_comments = df_pr_raw.copy()
-    if gst_pr in pr_comments.columns and inv_pr in pr_comments.columns:
-        pr_comments["_GST_KEY"] = pr_comments[gst_pr].map(clean_gstin)
-        pr_comments["_INV_KEY"] = pr_comments[inv_pr].map(inv_basic)
+    if pair_cols.get("gst_pr_col") in pr_comments.columns and pair_cols.get("inv_pr_col") in pr_comments.columns:
+        pr_comments["_GST_KEY"] = pr_comments[pair_cols["gst_pr_col"]].map(clean_gstin)
+        pr_comments["_INV_KEY"] = pr_comments[pair_cols["inv_pr_col"]].map(inv_basic)
         pr_comments["Mapping"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[0], axis=1)
         pr_comments["Remarks"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[1], axis=1)
         pr_comments["Reason"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[2], axis=1)
@@ -1044,16 +1076,78 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
 
-    # ---------------- Dashboard (transposed) ----------------
-    dashboard_df = build_dashboard(combined_df, pair_cols)
-    dashboard_tx = dashboard_df.set_index("Status").reset_index()
+    # ---------------- Dashboard (NEW layout) ----------------
+    dashboard_df = build_dashboard_v2(combined_df, pair_cols)
 
-    # ---------------- Add extra columns to Reconciliation ----------------
-    gstr1_col = pair_cols.get("gstr1_status_2b_col", None)
-    two_b_month_series = combined_df[gstr1_col] if gstr1_col and (gstr1_col in combined_df.columns) else ""
-    combined_df["2B month"] = two_b_month_series
-    combined_df["Eligibility"] = ""
-    combined_df["User Remarks"] = ""
+    # ---------------- Build Reconciliation sheet (NEW order) ----------------
+    # Helper: supplier name derived from PR first, else 2B
+    pr_name_col = pair_cols.get("vendor_name_pr")
+    b2_name_col = pair_cols.get("supplier_name_2b")
+
+    def choose_supplier_name(r):
+        name_pr = as_text(r.get(pr_name_col, "")) if pr_name_col and pr_name_col in combined_df.columns else ""
+        if name_pr:
+            return name_pr
+        name_b2 = as_text(r.get(b2_name_col, "")) if b2_name_col and b2_name_col in combined_df.columns else ""
+        return name_b2
+
+    # Friendly headings
+    gst_pr_col = pair_cols.get("gst_pr_col")
+    gst_2b_col = pair_cols.get("gst_2b_col")
+    inv_pr_col = pair_cols.get("inv_pr_col")
+    inv_2b_col = pair_cols.get("inv_2b_col")
+    date_pr_col = pair_cols.get("date_pr_col")
+    date_2b_col = pair_cols.get("date_2b_col")
+    cgst_pr_col = pair_cols.get("cgst_pr_col")
+    cgst_2b_col = pair_cols.get("cgst_2b_col")
+    sgst_pr_col = pair_cols.get("sgst_pr_col")
+    sgst_2b_col = pair_cols.get("sgst_2b_col")
+    igst_pr_col = pair_cols.get("igst_pr_col")
+    igst_2b_col = pair_cols.get("igst_2b_col")
+
+    rec = pd.DataFrame({
+        "GST Key": combined_df["_GST_KEY"],
+        "Invoice Key": combined_df["_INV_KEY"],
+        "Name of the Supplier": combined_df.apply(choose_supplier_name, axis=1),
+        "Mapping": combined_df["Mapping"].astype(str).str.title(),
+        "Remarks": combined_df["Remarks"],
+        "Reason": combined_df["Reason"],
+        "GSTIN PR": combined_df[gst_pr_col] if gst_pr_col in combined_df.columns else "",
+        "GSTIN 2B": combined_df[gst_2b_col] if gst_2b_col in combined_df.columns else "",
+        "Vendor Inv. PR": combined_df[inv_pr_col] if inv_pr_col in combined_df.columns else "",
+        "Invoice Number 2B": combined_df[inv_2b_col] if inv_2b_col in combined_df.columns else "",
+        "Invoice Date PR": combined_df[date_pr_col] if date_pr_col in combined_df.columns else "",
+        "Invoice Date 2B": combined_df[date_2b_col] if date_2b_col in combined_df.columns else "",
+        "CGST Amount PR": combined_df[cgst_pr_col] if cgst_pr_col in combined_df.columns else 0,
+        "CGST Amount 2B": combined_df[cgst_2b_col] if cgst_2b_col in combined_df.columns else 0,
+        "SGST Amount PR": combined_df[sgst_pr_col] if sgst_pr_col in combined_df.columns else 0,
+        "SGST Amount 2B": combined_df[sgst_2b_col] if sgst_2b_col in combined_df.columns else 0,
+        "IGST Amount PR": combined_df[igst_pr_col] if igst_pr_col in combined_df.columns else 0,
+        "IGST Amount 2B": combined_df[igst_2b_col] if igst_2b_col in combined_df.columns else 0,
+    })
+
+    # Totals
+    rec["Total Tax PR"] = pd.to_numeric(rec["CGST Amount PR"], errors="coerce").fillna(0) + \
+                          pd.to_numeric(rec["SGST Amount PR"], errors="coerce").fillna(0) + \
+                          pd.to_numeric(rec["IGST Amount PR"], errors="coerce").fillna(0)
+    rec["Total Tax 2B"] = pd.to_numeric(rec["CGST Amount 2B"], errors="coerce").fillna(0) + \
+                          pd.to_numeric(rec["SGST Amount 2B"], errors="coerce").fillna(0) + \
+                          pd.to_numeric(rec["IGST Amount 2B"], errors="coerce").fillna(0)
+
+    # Ensure column order EXACTLY as requested
+    rec = rec[
+        [
+            "GST Key", "Invoice Key", "Name of the Supplier",
+            "Mapping", "Remarks", "Reason",
+            "GSTIN PR", "GSTIN 2B",
+            "Vendor Inv. PR", "Invoice Number 2B",
+            "Invoice Date PR", "Invoice Date 2B",
+            "CGST Amount PR", "CGST Amount 2B",
+            "SGST Amount PR", "SGST Amount 2B",
+            "IGST Amount PR", "IGST Amount 2B",
+            "Total Tax PR", "Total Tax 2B",
+        ]
+    ]
 
     # --------- FAST XLSX WRITER (XlsxWriter) ---------
     def _autosize_ws(ws, df, min_w=12, max_w=48):
@@ -1062,7 +1156,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             header_len = len(str(col_name)) + 4
             try:
                 content_len = int(sample[col_name].astype(str).map(len).max())
-                # guard: content_len may be NaN if col not in sample
                 if isinstance(content_len, float) and math.isnan(content_len):
                     content_len = 0
             except Exception:
@@ -1079,21 +1172,21 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         wb = writer.book
         header_fmt = wb.add_format({"bold": True})
 
-        # ---------------- Reconciliation ----------------
-        combined_df.to_excel(writer, index=False, sheet_name="Reconciliation")
+        # ---------------- Reconciliation (NEW order) ----------------
+        rec.to_excel(writer, index=False, sheet_name="Reconciliation")
         ws = writer.sheets["Reconciliation"]
         ws.freeze_panes(1, 0)
-        ws.autofilter(0, 0, len(combined_df), max(0, combined_df.shape[1] - 1))
+        ws.autofilter(0, 0, len(rec), max(0, rec.shape[1] - 1))
         ws.set_row(0, None, header_fmt)
-        _autosize_ws(ws, combined_df)
+        _autosize_ws(ws, rec)
 
-        # ---------------- Dashboard ----------------
-        dashboard_tx.to_excel(writer, index=False, sheet_name="Dashboard")
+        # ---------------- Dashboard (NEW layout) ----------------
+        dashboard_df.to_excel(writer, index=False, sheet_name="Dashboard")
         ws2 = writer.sheets["Dashboard"]
         ws2.freeze_panes(1, 0)
-        ws2.autofilter(0, 0, len(dashboard_tx), max(0, dashboard_tx.shape[1] - 1))
+        ws2.autofilter(0, 0, len(dashboard_df), max(0, dashboard_df.shape[1] - 1))
         ws2.set_row(0, None, header_fmt)
-        _autosize_ws(ws2, dashboard_tx, min_w=14)
+        _autosize_ws(ws2, dashboard_df, min_w=14)
 
         # ---------------- PR - Comments ----------------
         pr_comments.to_excel(writer, index=False, sheet_name="PR - Comments")

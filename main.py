@@ -763,18 +763,16 @@ def verify_columns():
 
 # ------- Extracted heavy logic into a helper so the worker can call it -------
 
+# ---------- helpers (keep these near the other helpers) ----------
 def _pick_best_note_col(df: pd.DataFrame, primary: Optional[str]) -> Optional[str]:
-    """
-    For CDNR: if the primary note column is missing or >70% blank, pick a better one
-    from NOTE_NO_CANDIDATES_2B (first non-empty-heavy column wins).
-    """
+    """For CDNR: if the chosen note column is missing or >70% blank, pick a better one."""
     if df is None or df.empty:
         return primary
     def non_empty_ratio(col):
-        if col not in df.columns: return 0.0
+        if col not in df.columns:
+            return 0.0
         s = df[col].astype(str).str.strip()
         return (s != "").mean()
-    # if primary is weak, try alternatives
     if (not primary) or (non_empty_ratio(primary) < 0.30):
         best_col, best_score = None, 0.0
         for c in NOTE_NO_CANDIDATES_2B:
@@ -788,29 +786,33 @@ def _pick_best_note_col(df: pd.DataFrame, primary: Optional[str]) -> Optional[st
 def _rescue_empty_inv_keys(df: pd.DataFrame, inv_col: str) -> pd.DataFrame:
     """
     After consolidate_by_key, ensure _INV_KEY is not empty/NaN for CDNR rows.
-    - If empty/NaN, rebuild _INV_KEY from inv_col raw text via inv_basic()
+    - If empty/NaN, rebuild _INV_KEY from inv_col via inv_basic()
     - If still empty, assign a row-unique placeholder to prevent GSTIN-level collapse.
     """
     if df.empty:
         return df
     df = df.copy()
 
-    # Consider both NaN and "" as empty
     def _is_empty_key(s: pd.Series) -> pd.Series:
         return s.isna() | (s.astype(str).str.strip() == "")
 
     mask_empty = _is_empty_key(df["_INV_KEY"])
 
-    # Re-derive from the raw note/invoice column if available
     if mask_empty.any() and inv_col in df.columns:
-        df.loc[mask_empty, "_INV_KEY"] = df.loc[mask_empty, inv_col].map(lambda x: inv_basic(x))
+        df.loc[mask_empty, "_INV_KEY"] = df.loc[mask_empty, inv_col].map(inv_basic)
 
-    # If still empty, assign a unique placeholder per row
     mask_still = _is_empty_key(df["_INV_KEY"])
     if mask_still.any():
         df.loc[mask_still, "_INV_KEY"] = df.index[mask_still].map(lambda i: f"__CDNR_ROW__{i}__")
 
     return df
+
+def _append_if_missing(target_list: List[str], candidates: List[Optional[str]]) -> None:
+    """Avoids any 'must not in …' parsing weirdness and keeps linters happy."""
+    for c in candidates:
+        if c and (c not in target_list):
+            target_list.append(c)
+
 
 def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                                  # B2B (invoice-based)
@@ -830,7 +832,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     def load_sheet(name):
         df = pd.read_excel(tmp2b_path, sheet_name=name, header=[4, 5])
         df = df.dropna(how="all")
-        if df.empty: return df
+        if df.empty:
+            return df
         df.columns = flatten_columns(df.columns)
         df, _ = normalize_columns(df)
         df["_SOURCE_SHEET"] = name
@@ -842,9 +845,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     df_pr_raw = pd.read_excel(tmppr_path)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)  # normalize PR headers, keep map
 
-    # ---------------- Apply sign logic for B2B-CDNR ----------------
+    # ---------------- Apply sign logic for B2B & CDNR ----------------
     def apply_signs(df):
-        if df.empty: return df
+        if df.empty:
+            return df
         df = df.copy()
         def get_note_type(row):
             inv = as_text(row.get(INVOICE_CANDIDATES_2B[0], "") if INVOICE_CANDIDATES_2B else "")
@@ -856,8 +860,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                 return "credit"
             return "invoice"
         df["_NOTE_TYPE"] = df.apply(get_note_type, axis=1)
-        numeric_cols = CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B + TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B + INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
-        numeric_cols = [c for c in numeric_cols if c in df.columns]
+        numeric_cols = [c for c in (
+            CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B +
+            TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B + INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
+        ) if c in df.columns]
         for col in numeric_cols:
             df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
         return df
@@ -865,7 +871,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     df_b2b_raw = apply_signs(df_b2b_raw)
     df_cdnr_raw = apply_signs(df_cdnr_raw)
 
-    # ---- Robust fallback: normalized selection must match ANY header ----
+    # ---- normalized selection must match ANY header (robust) ----
     def match_provided(df: pd.DataFrame, provided: str) -> Optional[str]:
         if not provided:
             return None
@@ -878,7 +884,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         return None
 
     def ensure_col(df, provided, candidates, avoid=None, penalties=None, value_picker=None):
-        if df is None or df.empty: return None
+        if df is None or df.empty:
+            return None
         col = match_provided(df, provided)
         if col and col in df.columns:
             return col
@@ -891,16 +898,17 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                 return guess
         return None
 
-    # ---------- NEW: hard-pick CDNR note/dated columns by substring match ----------
+    # ---------- CDNR strong substring picks (helps PyCharm infer flow too) ----------
     def _pick_col_contains(df, pattern):
+        if df is None:
+            return None
         pat = re.compile(pattern, re.I)
-        for c in (df.columns if df is not None else []):
+        for c in df.columns:
             if pat.search(str(c)):
                 return c
         return None
-    cdnr_note_hard  = _pick_col_contains(df_cdnr_raw,  r"\bnote\s*number\b")
-    cdnr_ndate_hard = _pick_col_contains(df_cdnr_raw,  r"\bnote\s*date\b")
-    # -------------------------------------------------------------------------------
+    cdnr_note_hard  = _pick_col_contains(df_cdnr_raw, r"\bnote\s*number\b")
+    cdnr_ndate_hard = _pick_col_contains(df_cdnr_raw, r"\bnote\s*date\b")
 
     # --- Resolve columns for B2B (invoice-based) ---
     inv_2b_b2b = ensure_col(df_b2b_raw, inv_2b_b2b_sel, INVOICE_CANDIDATES_2B)
@@ -913,20 +921,31 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     # --- Resolve columns for CDNR (note-based) ---
     note_2b_cdnr     = ensure_col(df_cdnr_raw, note_2b_cdnr_sel, NOTE_NO_CANDIDATES_2B)
     notedate_2b_cdnr = ensure_col(df_cdnr_raw, notedate_2b_cdnr_sel, NOTE_DATE_CANDIDATES_2B)
-
-    # ---------- NEW: prefer the hard-picked columns when present ----------
-    if cdnr_note_hard:    note_2b_cdnr     = cdnr_note_hard
-    if cdnr_ndate_hard:   notedate_2b_cdnr = cdnr_ndate_hard
-    # ---------- keep existing "best note col" rescue ----------
+    if cdnr_note_hard:
+        note_2b_cdnr = cdnr_note_hard
+    if cdnr_ndate_hard:
+        notedate_2b_cdnr = cdnr_ndate_hard
     note_2b_cdnr = _pick_best_note_col(df_cdnr_raw, note_2b_cdnr)
-    # ----------------------------------------------------------------------
 
     gst_2b_cdnr = ensure_col(df_cdnr_raw, gst_2b_cdnr_sel, GSTIN_CANDIDATES_2B)
     cgst_2b_cdnr = ensure_col(df_cdnr_raw, cgst_2b_cdnr_sel, CGST_CANDIDATES_2B)
     sgst_2b_cdnr = ensure_col(df_cdnr_raw, sgst_2b_cdnr_sel, SGST_CANDIDATES_2B)
     igst_2b_cdnr = ensure_col(df_cdnr_raw, igst_2b_cdnr_sel, IGST_CANDIDATES_2B)
 
-    # Optional numeric columns (per sheet)
+    # --- Resolve columns for PR ---
+    gst_pr = ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
+                        penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
+                        value_picker=lambda d: pick_gstin_by_values(d, prefer_supplier=True))
+    inv_pr = ensure_col(df_pr_raw, inv_pr_sel, INVOICE_CANDIDATES_PR,
+                        avoid=AVOID_DOC_LIKE_FOR_PR,
+                        penalties=["company", "recipient", "gstin"],
+                        value_picker=pick_invoice_by_values)
+    date_pr = ensure_col(df_pr_raw, date_pr_sel, DATE_CANDIDATES_PR)
+    cgst_pr = ensure_col(df_pr_raw, cgst_pr_sel, CGST_CANDIDATES_PR)
+    sgst_pr = ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
+    igst_pr = ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
+
+    # ---------------- Optional numeric columns ----------------
     def optional_numeric_list(df_):
         res = []
         for pool in [[ "taxable value","taxable amount","assessable value","taxable" ],
@@ -939,37 +958,36 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         return res
 
     opt_2b_b2b = optional_numeric_list(df_b2b_raw)
-    for must in [cgst_2b_b2b, sgst_2b_b2b, igst_2b_b2b]:
-        if must and (must not in opt_2b_b2b):
-            opt_2b_b2b.append(must)
+    _append_if_missing(opt_2b_b2b, [cgst_2b_b2b, sgst_2b_b2b, igst_2b_b2b])
 
     opt_2b_cdnr = optional_numeric_list(df_cdnr_raw)
-    for must in [cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr]:
-        if must and (must not in opt_2b_cdnr):
-            opt_2b_cdnr.append(must)
+    _append_if_missing(opt_2b_cdnr, [cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr])
 
     opt_pr = optional_numeric_list(df_pr_raw)
-    for must in [cgst_pr, sgst_pr, igst_pr]:
-        if must and (must not in opt_pr):
-            opt_pr.append(must)
+    _append_if_missing(opt_pr, [cgst_pr, sgst_pr, igst_pr])
 
-    # Consolidate per required logic:
-    #   • B2B: GSTIN + Invoice Number
-    #   • CDNR: GSTIN + Note Number
-    df_2b_b2b = consolidate_by_key(df=df_b2b_raw, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b, date_col=date_2b_b2b, numeric_cols=opt_2b_b2b) if (df_b2b_raw is not None and not df_b2b_raw.empty and inv_2b_b2b and gst_2b_b2b) else pd.DataFrame()
-    df_2b_cdnr = consolidate_by_key(df=df_cdnr_raw, gstin_col=gst_2b_cdnr, inv_col=note_2b_cdnr, date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr) if (df_cdnr_raw is not None and not df_cdnr_raw.empty and note_2b_cdnr and gst_2b_cdnr) else pd.DataFrame()
+    # ---------------- Consolidate ----------------
+    df_2b_b2b = consolidate_by_key(
+        df=df_b2b_raw, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b,
+        date_col=date_2b_b2b, numeric_cols=opt_2b_b2b
+    ) if (df_b2b_raw is not None and not df_b2b_raw.empty and inv_2b_b2b and gst_2b_b2b) else pd.DataFrame()
+
+    df_2b_cdnr = consolidate_by_key(
+        df=df_cdnr_raw, gstin_col=gst_2b_cdnr, inv_col=note_2b_cdnr,
+        date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr
+    ) if (df_cdnr_raw is not None and not df_cdnr_raw.empty and note_2b_cdnr and gst_2b_cdnr) else pd.DataFrame()
 
     # Ensure CDNR has non-empty _INV_KEY (Note Number) so it never collapses at GSTIN level
     if not df_2b_cdnr.empty:
         df_2b_cdnr = _rescue_empty_inv_keys(df_2b_cdnr, inv_col=note_2b_cdnr)
 
-        # ---------- NEW: quick debug so you can verify in logs ----------
+        # -------- debug prints you asked for --------
         print("CDNR Note column picked:", note_2b_cdnr)
         print("CDNR Note date column:", notedate_2b_cdnr)
         pct_empty = (
             (df_2b_cdnr["_INV_KEY"].astype(str).str.strip() == "") |
             (df_2b_cdnr["_INV_KEY"].isna())
-        ).fillna(False).mean()
+        ).mean()
         print(f"CDNR empty _INV_KEY %: {pct_empty:.2%}")
         try:
             cols_to_show = ["_GST_KEY", "_INV_KEY"]
@@ -978,15 +996,17 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             print(df_2b_cdnr.head(5)[cols_to_show])
         except Exception:
             pass
-        # ---------------------------------------------------------------
+        # --------------------------------------------
 
-    df_pr = consolidate_by_key(df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr, date_col=date_pr, numeric_cols=opt_pr)
+    df_pr = consolidate_by_key(
+        df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr,
+        date_col=date_pr, numeric_cols=opt_pr
+    )
 
-    # Create display columns so that:
-    #   • For B2B rows: _INV_DISPLAY = Invoice Number, _DATE_DISPLAY = Invoice Date
-    #   • For CDNR rows: _INV_DISPLAY = Note Number,   _DATE_DISPLAY = Note Date
+    # ---------- display columns (Invoice vs Note) ----------
     def add_display_cols(df_, inv_col, date_col, source_tag):
-        if df_.empty: return df_
+        if df_.empty:
+            return df_
         df = df_.copy()
         df["_INV_DISPLAY"] = df[inv_col] if inv_col in df.columns else ""
         df["_DATE_DISPLAY"] = df[date_col] if date_col and date_col in df.columns else ""
@@ -995,13 +1015,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     df_2b_b2b = add_display_cols(df_2b_b2b, inv_2b_b2b, date_2b_b2b, "B2B")
     df_2b_cdnr = add_display_cols(df_2b_cdnr, note_2b_cdnr, notedate_2b_cdnr, "B2B-CDNR")
+    df_2b = pd.concat([df_2b_b2b, df_2b_cdnr], ignore_index=True) if (not df_2b_b2b.empty or not df_2b_cdnr.empty) else df_2b_b2b
 
-    # Combine 2B datasets so the recon shows B2B invoices and CDNR notes together;
-    # matching uses _GST_KEY/_INV_KEY (already built from invoice or note accordingly)
-    df_2b = pd.concat([df_2b_b2b, df_2b_cdnr], ignore_index=True) if not df_2b_b2b.empty or not df_2b_cdnr.empty else df_2b_b2b
-
-    # Call pairwise recon but tell it to use the unified display columns for 2B:
-    # This ensures "Note Number" appears under "Invoice Number (2B)" and "Note Date" under "Invoice Date (2B)".
+    # ---------- build pairwise recon (this shows Note No under "Invoice Number (2B)") ----------
     combined_df, pair_cols = build_pairwise_recon(
         df_pr=df_pr, df_2b=df_2b,
         inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr,
@@ -1028,26 +1044,26 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
 
-    # ---------------- Prepare Dashboard (transposed) ----------------
+    # ---------------- Dashboard (transposed) ----------------
     dashboard_df = build_dashboard(combined_df, pair_cols)
     dashboard_tx = dashboard_df.set_index("Status").reset_index()
 
     # ---------------- Add extra columns to Reconciliation ----------------
     gstr1_col = pair_cols.get("gstr1_status_2b_col", None)
-    two_b_month_series = combined_df[gstr1_col] if gstr1_col and gstr1_col in combined_df.columns else ""
+    two_b_month_series = combined_df[gstr1_col] if gstr1_col and (gstr1_col in combined_df.columns) else ""
     combined_df["2B month"] = two_b_month_series
     combined_df["Eligibility"] = ""
     combined_df["User Remarks"] = ""
 
     # --------- FAST XLSX WRITER (XlsxWriter) ---------
     def _autosize_ws(ws, df, min_w=12, max_w=48):
-        # Sample first 200 rows for width estimate to avoid full column scans
         sample = df.head(200)
         for col_idx, col_name in enumerate(df.columns):
             header_len = len(str(col_name)) + 4
             try:
                 content_len = int(sample[col_name].astype(str).map(len).max())
-                if math.isnan(content_len):
+                # guard: content_len may be NaN if col not in sample
+                if isinstance(content_len, float) and math.isnan(content_len):
                     content_len = 0
             except Exception:
                 content_len = 0

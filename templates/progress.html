@@ -3,187 +3,126 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Reconciliation Progress</title>
+  <title>Reconciliation progress</title>
   <style>
     :root {
-      --bg: #0b0f1a;
-      --card: #121827;
-      --text: #e5e7eb;
-      --muted: #9ca3af;
-      --accent: #22c55e;
-      --accent-dim: #16a34a;
-      --ring: rgba(34,197,94,.25);
+      --bg:#0f1115; --card:#161a22; --text:#e6e8ee; --muted:#9aa3b2;
+      --bar-bg:#2a3140; --bar:#4f8cff; --ok:#23c55e; --err:#ef4444;
     }
-    html, body { height:100%; margin:0; background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-    .wrap { min-height:100%; display:grid; place-items:center; padding:24px; }
-    .card {
-      width: min(520px, 92vw);
-      background: var(--card);
-      border: 1px solid rgba(255,255,255,.06);
-      border-radius: 16px;
-      box-shadow: 0 10px 30px rgba(0,0,0,.35);
-      padding: 24px 22px;
-    }
-    .title { font-size: 1.1rem; font-weight: 600; margin: 0 0 8px; }
-    .subtitle { color: var(--muted); font-size: .925rem; margin: 0 0 18px; }
-    .row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin: 10px 0; }
-    .pill {
-      display:inline-flex; align-items:center; gap:8px;
-      background: rgba(255,255,255,.06);
-      color: var(--muted); border-radius: 999px; padding:6px 12px; font-size:.85rem;
-    }
-    .spinner {
-      width:14px; height:14px; border:2px solid var(--muted); border-top-color: var(--accent);
-      border-radius:50%; animation: spin 1s linear infinite;
-    }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif;
+           background:var(--bg); color:var(--text); display:grid; place-items:center; min-height:100vh; }
+    .card { width:min(720px, 92vw); background:var(--card); border-radius:16px; padding:24px 24px 20px; box-shadow: 0 10px 30px rgb(0 0 0 / 35%); }
+
+    h1 { margin:0 0 6px; font-size:20px; font-weight:650; letter-spacing:.2px; }
+    p.sub { margin:0 0 16px; color:var(--muted); }
+
+    .status-row { display:flex; align-items:center; gap:12px; margin:10px 0 14px; }
+    .pill { font-size:12px; padding:4px 10px; border-radius:999px; background:#1e2633; color:#C5D1E5; }
+
+    /* Spinner */
+    .spin { width:18px; height:18px; border-radius:50%;
+            border:3px solid #2a3140; border-top-color:var(--bar); animation: spin 0.85s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .bar {
-      position: relative; width: 100%; height: 12px; background: rgba(255,255,255,.08);
-      border-radius: 999px; overflow: hidden; outline: 1px solid rgba(255,255,255,.06);
-    }
-    .bar > .fill {
-      height: 100%; width: 0%;
-      background: linear-gradient(90deg, var(--accent), var(--accent-dim));
-      box-shadow: 0 0 0 6px var(--ring) inset;
-      transition: width .35s ease;
-    }
-    .percent { font-variant-numeric: tabular-nums; font-weight:600; }
+    .msg { color:var(--muted); font-size:14px; }
 
-    .note { color: var(--muted); font-size: .9rem; margin-top: 14px; }
+    /* Progress bar with animated stripes while active */
+    .bar { position:relative; height:12px; width:100%; background:var(--bar-bg); border-radius:999px; overflow:hidden; }
+    .bar > span { position:relative; display:block; height:100%; width:0%; background:var(--bar); transition:width .5s ease; }
+    .bar.active > span::after {
+      content:""; position:absolute; inset:0; background:linear-gradient(120deg, #ffffff33 25%, transparent 25%, transparent 50%, #ffffff33 50%, #ffffff33 75%, transparent 75%, transparent);
+      background-size: 24px 12px; animation: move 0.9s linear infinite;
+      border-radius:inherit;
+    }
+    @keyframes move { from { transform: translateX(0); } to { transform: translateX(24px); } }
 
-    /* Final dialog */
-    .modal-backdrop {
-      position: fixed; inset: 0; background: rgba(0,0,0,.5);
-      display: none; align-items: center; justify-content: center; z-index: 50;
-    }
-    .modal {
-      width: min(420px, 90vw);
-      background: #0f172a; border:1px solid rgba(255,255,255,.08); border-radius: 14px;
-      box-shadow: 0 12px 40px rgba(0,0,0,.5);
-      padding: 20px;
-      text-align:center;
-    }
-    .btn {
-      appearance: none; border:0; outline:0; cursor:pointer;
-      background: var(--accent); color:#08130b; font-weight:700;
-      padding:10px 16px; border-radius:10px; margin-top: 14px;
-    }
-    .btn:hover { background: var(--accent-dim); }
+    .pct { font-variant-numeric: tabular-nums; font-weight:600; width:48px; text-align:right; }
+    .row { display:flex; align-items:center; gap:12px; }
+
+    .hidden { display:none; }
+    .footer { margin-top:14px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); font-size:13px; }
+    a.btn { background:#1f2937; color:#e6e8ee; text-decoration:none; padding:8px 12px; border-radius:10px; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card" id="card" data-job-id="{{ job_id }}">
-      <div class="row">
-        <div class="title">Reconciliation started</div>
-        <span class="pill"><span class="spinner"></span> <span id="state">queued</span></span>
-      </div>
-      <p class="subtitle">We’re processing your files in the background. This page will update automatically.</p>
+  <div class="card">
+    <!-- Change these lines to whatever wording you prefer -->
+    <h1 id="title">Reconciliation started</h1>
+    <p class="sub" id="subtitle">We’re processing your files. This page updates automatically.</p>
 
-      <div class="row" style="margin-top:6px;">
-        <div class="percent" id="percent">0%</div>
-      </div>
-      <div class="bar" aria-label="Progress">
-        <div class="fill" id="fill" style="width:0%"></div>
-      </div>
-
-      <p class="note" id="note">Waiting for a worker to pick up your job…</p>
+    <div class="status-row">
+      <div id="spinner" class="spin" aria-hidden="true"></div>
+      <span class="pill" id="statePill">started</span>
+      <span class="msg" id="liveMsg">Crunching rows in the background…</span>
     </div>
-  </div>
 
-  <!-- Invisible target for download so we don't navigate away -->
-  <iframe id="dl" style="display:none;"></iframe>
+    <div class="row" style="margin-bottom:8px;">
+      <div id="bar" class="bar active"><span id="barFill"></span></div>
+      <div class="pct" id="pctText">0%</div>
+    </div>
 
-  <!-- Final modal -->
-  <div class="modal-backdrop" id="doneModal">
-    <div class="modal">
-      <h3 style="margin:0 0 8px;">Downloaded</h3>
-      <p class="subtitle" style="margin:0 0 12px;">Your reconciliation file has been downloaded.</p>
-      <button class="btn" id="okBtn">OK</button>
+    <div class="footer">
+      <span id="hint">Please keep this tab open.</span>
+      <a id="downloadBtn" class="btn hidden" href="#">Download result</a>
     </div>
   </div>
 
   <script>
     (function () {
-      const elCard = document.getElementById('card');
-      const jobId = elCard.getAttribute('data-job-id');
-      const elState = document.getElementById('state');
-      const elPercent = document.getElementById('percent');
-      const elFill = document.getElementById('fill');
-      const elNote = document.getElementById('note');
-      const doneModal = document.getElementById('doneModal');
-      const okBtn = document.getElementById('okBtn');
-      const dlFrame = document.getElementById('dl');
+      const jobId = "{{ job_id }}";
+      const bar = document.getElementById("bar");
+      const pctText = document.getElementById("pctText");
+      const barFill = document.getElementById("barFill");
+      const statePill = document.getElementById("statePill");
+      const liveMsg  = document.getElementById("liveMsg");
+      const dlBtn    = document.getElementById("downloadBtn");
+      const hint     = document.getElementById("hint");
+      const spinner  = document.getElementById("spinner");
 
-      const STATUS_URL = `/status/${jobId}`;
-      const DOWNLOAD_URL = `/download/${jobId}`;
-
-      let finished = false;
-      let pollMs = 1500;
-
-      async function getStatus() {
-        try {
-          const res = await fetch(STATUS_URL, { headers: { 'Accept': 'application/json' }, cache: 'no-store' });
-          if (!res.ok) throw new Error('bad status');
-          // Expect JSON like: {state: "queued|started|finished|failed", progress: 0-100, message?: "" }
-          const data = await res.json();
-          return data;
-        } catch (e) {
-          // Fallback: try text and derive something minimal
-          const res = await fetch(STATUS_URL + '?t=' + Date.now(), { cache: 'no-store' });
-          const txt = await res.text();
-          // naive parse e.g. "0% - queued"
-          const m = txt.match(/(\d+)%.*(queued|started|finished|failed)/i);
-          const pct = m ? parseInt(m[1], 10) : 0;
-          const st = m ? m[2].toLowerCase() : 'queued';
-          return { state: st, progress: pct, message: txt };
+      let lastPct = 0;
+      function update(pct, msg, state){
+        pct = Math.max(0, Math.min(100, parseInt(pct || 0, 10)));
+        if (pct !== lastPct) {
+          pctText.textContent = pct + "%";
+          barFill.style.width = pct + "%";
+          lastPct = pct;
         }
+        if (msg)   liveMsg.textContent = msg;
+        if (state) statePill.textContent = state;
       }
 
-      function render({ state, progress, message }) {
-        elState.textContent = state;
-        elPercent.textContent = `${progress|0}%`;
-        elFill.style.width = `${Math.max(0, Math.min(100, progress|0))}%`;
+      async function tick(){
+        try{
+          const r = await fetch(`/status/${jobId}`, { cache: "no-store" });
+          if(!r.ok) throw new Error("status " + r.status);
+          const j = await r.json();
+          const state = j.state || "queued";
+          const prog  = j.progress || {};
+          update(prog.pct, prog.msg, state);
 
-        if (state === 'queued') {
-          elNote.textContent = 'Waiting for a worker to pick up your job…';
-        } else if (state === 'started' || state === 'processing' || state === 'working') {
-          elNote.textContent = 'Crunching rows in the background…';
-        } else if (state === 'finished' || state === 'complete' || progress >= 100) {
-          elNote.textContent = 'Preparing your download…';
-        } else if (state === 'failed') {
-          elNote.textContent = (message || 'Job failed. Please try again.');
-        }
+          if (state === "finished"){
+            spinner.classList.add("hidden");
+            bar.classList.remove("active");
+            statePill.textContent = "finished";
+            hint.textContent = "Your file is ready.";
+            dlBtn.classList.remove("hidden");
+            dlBtn.href = `/download/${jobId}`;
+            // optional auto-download:
+            window.location.href = `/download/${jobId}`;
+            return;
+          }
+          if (state === "failed"){
+            spinner.classList.add("hidden");
+            bar.classList.remove("active");
+            statePill.textContent = "failed";
+            statePill.style.background = "#ef4444";
+            hint.textContent = "The job failed. Please try again.";
+            console.error(j.error || "Job failed");
+            return;
+          }
+        }catch(e){ console.error(e); }
+        setTimeout(tick, 1200);
       }
-
-      async function tick() {
-        if (finished) return;
-        const st = await getStatus();
-        render(st);
-
-        if ((st.state === 'finished' || st.state === 'complete' || (st.progress|0) >= 100) && !finished) {
-          finished = true;
-          // Trigger download without leaving the page
-          dlFrame.src = DOWNLOAD_URL;
-
-          // Give the browser a moment to start the download, then show the final modal
-          setTimeout(() => { doneModal.style.display = 'flex'; }, 900);
-          return;
-        }
-
-        if (st.state === 'failed') {
-          elNote.style.color = '#fca5a5';
-          return; // stop polling on failure
-        }
-
-        setTimeout(tick, pollMs);
-      }
-
-      okBtn.addEventListener('click', () => {
-        window.location.href = '/';
-      });
-
       tick();
     })();
   </script>

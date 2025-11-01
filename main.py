@@ -1,30 +1,63 @@
 import io
 import re
 import os
+from dotenv import load_dotenv
+load_dotenv(override=False)  # ensures both Flask and RQ worker see .env
+
 import math
 import tempfile
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple
 from collections import defaultdict
-
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session, jsonify
-
 import pandas as pd
-
 # ------- NEW: Queue & Google Drive imports -------
 from redis import Redis
 from rq import Queue, get_current_job
 from rq.job import Job
-
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 # -------------------- Flask & App Config --------------------
-
 app = Flask(__name__)
-app.secret_key = "change-this-secret"
+# Use SECRET_KEY from environment (Render), fallback for local dev
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-for-local-use-only")
+# File upload limit
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB
+
+# Database: PostgreSQL on Render, SQLite locally
+database_url = os.environ.get("DATABASE_URL")
+if database_url:
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_url.replace("postgres://", "postgresql://")
+else:
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///users.db"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+# ------- Initialize SQLAlchemy (for auth) -------
+from flask_sqlalchemy import SQLAlchemy
+db = SQLAlchemy(app)
+
+# User Model (for login/subscribe)
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(200), nullable=False)
+    subscribed = db.Column(db.Boolean, default=False)
+    def __repr__(self):
+        return f'<User {self.email}>'
+
+import threading
+_tables_created = False
+_tables_lock = threading.Lock()
+@app.before_request
+def create_tables_once():
+    global _tables_created
+    if not _tables_created:
+        with _tables_lock:
+            if not _tables_created:
+                db.create_all()
+                _tables_created = True
 
 # ------- NEW: Redis Queue (for background jobs) -------
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -37,9 +70,10 @@ SERVICE_ACCOUNT_FILE = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'cred.js
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', None)
 
 def _drive_service():
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES
-    )
+    path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or SERVICE_ACCOUNT_FILE
+    if not path or not os.path.exists(path):
+        raise RuntimeError(f"GOOGLE_APPLICATION_CREDENTIALS missing or not found: {path}")
+    creds = service_account.Credentials.from_service_account_file(path, scopes=SCOPES)
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
 def upload_to_drive(local_path: str, filename: str) -> str:
@@ -52,7 +86,7 @@ def upload_to_drive(local_path: str, filename: str) -> str:
         body=metadata,
         media_body=media,
         fields='id',
-        supportsAllDrives=True     # <-- add this
+        supportsAllDrives=True
     ).execute()
     return file.get('id')
 
@@ -60,7 +94,7 @@ def download_from_drive(file_id: str, local_path: str):
     service = _drive_service()
     request = service.files().get_media(
         fileId=file_id,
-        supportsAllDrives=True     # <-- add this
+        supportsAllDrives=True
     )
     with io.FileIO(local_path, 'wb') as fh:
         downloader = MediaIoBaseDownload(fh, request)
@@ -69,7 +103,6 @@ def download_from_drive(file_id: str, local_path: str):
             status, done = downloader.next_chunk()
 
 # -------------------- Column candidates --------------------
-
 # GSTR-2B (flattened) candidates
 INVOICE_CANDIDATES_2B = [
     "invoice details invoice number", "invoice number", "invoice no", "inv no", "inv number",
@@ -83,6 +116,14 @@ GSTIN_CANDIDATES_2B = [
 DATE_CANDIDATES_2B = [
     "invoice details invoice date", "invoice date", "doc date", "document date", "date"
 ]
+# NEW: explicit note number/date candidates for CDNR
+NOTE_NO_CANDIDATES_2B = [
+    "note no", "note number", "credit note no", "debit note no", "cn no", "dn no", "document number", "document no"
+]
+NOTE_DATE_CANDIDATES_2B = [
+    "note date", "document date", "doc date", "credit note date", "debit note date"
+]
+
 CGST_CANDIDATES_2B = ["cgst", "central tax", "central tax amount", "cgst amount"]
 SGST_CANDIDATES_2B = ["sgst", "state tax", "state/ut tax", "state tax amount", "sgst amount", "utgst", "utgst amount"]
 IGST_CANDIDATES_2B = ["igst", "integrated tax", "integrated tax amount", "igst amount"]
@@ -132,7 +173,6 @@ GSTR1_STATUS_2B_CANDIDATES = [
 ]
 
 # -------------------- Column detection helpers --------------------
-
 def _norm(s: str) -> str:
     return re.sub(r'[^a-z0-9]', '', str(s).strip().lower())
 
@@ -193,10 +233,17 @@ def flatten_columns(cols) -> List[str]:
     if isinstance(cols, pd.MultiIndex):
         out = []
         for tup in cols:
-            parts = [str(x).strip() for x in tup if (x is not None and str(x).strip().lower() != "nan")]
+            parts = []
+            for x in tup:
+                if x is None:
+                    continue
+                s = str(x).replace("\xa0", " ").strip()
+                if not s or s.lower().startswith("unnamed:") or s.lower() == "nan":
+                    continue
+                parts.append(s)
             out.append(" ".join(parts))
         return out
-    return [str(c) for c in cols]
+    return [str(c).replace("\xa0", " ").strip()]
 
 def _find_optional_col(df: pd.DataFrame, pools: List[List[str]]) -> Optional[str]:
     for cands in pools:
@@ -206,7 +253,6 @@ def _find_optional_col(df: pd.DataFrame, pools: List[List[str]]) -> Optional[str
     return None
 
 # ---------- Value-based detectors (safety net) ----------
-
 GSTIN_REGEX = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][A-Z0-9]Z[A-Z0-9]$", re.IGNORECASE)
 
 def _looks_like_gstin_series(s: pd.Series) -> float:
@@ -260,7 +306,6 @@ def pick_invoice_by_values(df: pd.DataFrame) -> Optional[str]:
     return best[1]
 
 # -------------------- Normalization of cell values --------------------
-
 def as_text(x) -> str:
     if x is None or (isinstance(x, float) and math.isnan(x)): return ""
     if isinstance(x, int): return str(x).strip()
@@ -336,7 +381,6 @@ def round_rupee(x) -> int:
         return 0
 
 # -------------------- Consolidation (SUMIF-style) --------------------
-
 def consolidate_by_key(
     df: pd.DataFrame,
     gstin_col: str,
@@ -346,7 +390,6 @@ def consolidate_by_key(
 ) -> pd.DataFrame:
     if df.empty:
         return df.copy()
-
     work = df.copy()
     work["_GST_KEY"] = work[gstin_col].map(clean_gstin)
     work[inv_col] = work[inv_col].map(as_text)
@@ -377,11 +420,9 @@ def consolidate_by_key(
     if "_DATE_TMP" in grouped.columns:
         grouped[date_col or "Invoice Date (derived)"] = grouped["_DATE_TMP"]
         grouped.drop(columns=["_DATE_TMP"], inplace=True)
-
     return grouped
 
 # -------------------- Reconciliation (with rounding + "Almost Match") --------------------
-
 def build_lookup(df_2b: pd.DataFrame, inv_col_2b: str, gstin_col_2b: str) -> Dict[str, List[int]]:
     lookup: Dict[str, List[int]] = defaultdict(list)
     for idx, row in df_2b.iterrows():
@@ -396,27 +437,22 @@ def reconcile(
     inv_col_pr: str, gstin_col_pr: str, date_col_pr: Optional[str], cgst_col_pr: Optional[str], sgst_col_pr: Optional[str], igst_col_pr: Optional[str],
     inv_col_2b: str, gstin_col_2b: str, date_col_2b: Optional[str], cgst_col_2b: Optional[str], sgst_col_2b: Optional[str], igst_col_2b: Optional[str],
 ) -> pd.DataFrame:
-
     b2_lookup = build_lookup(df_2b, inv_col_2b, gstin_col_2b)
-
     mappings, remarks, reasons = [], [], []
 
     for _, row in df_pr.iterrows():
         gst_pr = clean_gstin(row.get(gstin_col_pr, ""))
         inv_pr = inv_basic(row.get(inv_col_pr, ""))
-
         if not gst_pr or not inv_pr:
-            mappings.append("not matched"); remarks.append("no GSTIN+Invoice in PR"); reasons.append("missing GSTIN/Invoice in PR"); continue
+            mappings.append("Not Matched"); remarks.append("no GSTIN+Invoice in PR"); reasons.append("missing GSTIN/Invoice in PR"); continue
 
         key = concat_key(gst_pr, inv_pr)
         cand_idxs = b2_lookup.get(key, [])
-
         if not cand_idxs:
-            mappings.append("not matched"); remarks.append("no GSTIN+Invoice match"); reasons.append(""); continue
+            mappings.append("Not Matched"); remarks.append("no GSTIN+Invoice match"); reasons.append(""); continue
 
         idx2b = cand_idxs[0]
         row2b = df_2b.iloc[idx2b]
-
         mismatches = []
 
         if date_col_pr and date_col_2b:
@@ -444,14 +480,14 @@ def reconcile(
             if len(cand_idxs) > 1:
                 extra.append(f"multiple matches in 2B ({len(cand_idxs)})")
             reasons.append("; ".join(mismatches + extra))
-            mappings.append("Almost Match")
+            mappings.append("Almost Matched")
         else:
             extra = []
             if len(cand_idxs) > 1:
                 extra.append(f"multiple matches in 2B ({len(cand_idxs)})")
             remarks.append("All fields matched" + ("" if not extra else f" ({'; '.join(extra)})"))
             reasons.append("")
-            mappings.append("matched")
+            mappings.append("Matched")
 
     out = df_pr.copy()
     out["Mapping"] = mappings
@@ -460,7 +496,6 @@ def reconcile(
     return out
 
 # -------------------- Pairwise combined output --------------------
-
 def build_pairwise_recon(
     df_pr: pd.DataFrame, df_2b: pd.DataFrame,
     inv_pr: str, gst_pr: str, date_pr: str, cgst_pr: str, sgst_pr: str, igst_pr: str,
@@ -469,6 +504,7 @@ def build_pairwise_recon(
     # Explicit suffixing
     pr = df_pr.copy()
     b2 = df_2b.copy()
+
     for c in list(pr.columns):
         if c not in ["_GST_KEY", "_INV_KEY"]:
             pr.rename(columns={c: f"{c}_PR"}, inplace=True)
@@ -482,7 +518,6 @@ def build_pairwise_recon(
     key_grp = merged.groupby(["_GST_KEY", "_INV_KEY"], dropna=False)
     pr_cols_all = [c for c in merged.columns if c.endswith("_PR")]
     b2_cols_all = [c for c in merged.columns if c.endswith("_2B")]
-
     for col in pr_cols_all:
         merged[col] = key_grp[col].transform(lambda s: s.ffill().bfill())
     for col in b2_cols_all:
@@ -491,7 +526,6 @@ def build_pairwise_recon(
 
     # Column names used later
     inv_pr_col = f"{inv_pr}_PR" if inv_pr else None
-    gst_pr_col = f"{gst_pr}_PR" if inv_pr else None and f"{gst_pr}_PR"
     gst_pr_col = f"{gst_pr}_PR" if gst_pr else None
     inv_2b_col = f"{inv_2b}_2B" if inv_2b else None
     gst_2b_col = f"{gst_2b}_2B" if gst_2b else None
@@ -514,11 +548,10 @@ def build_pairwise_recon(
 
         pr_present = bool(pr_inv_val) or bool(pr_gst_val)
         b2_present = bool(b2_inv_val) or bool(b2_gst_val)
-
         if pr_present and not b2_present:
-            mapping.append("not matched"); remarks.append("missing in 2B"); reason.append(""); continue
+            mapping.append("Not Matched"); remarks.append("missing in 2B"); reason.append(""); continue
         if b2_present and not pr_present:
-            mapping.append("not matched"); remarks.append("missing in PR"); reason.append(""); continue
+            mapping.append("Not Matched"); remarks.append("missing in PR"); reason.append(""); continue
 
         mismatches = []
         if date_pr_col and date_2b_col:
@@ -538,9 +571,9 @@ def build_pairwise_recon(
             mismatches.append("IGST")
 
         if mismatches:
-            mapping.append("Almost Match"); remarks.append("mismatch"); reason.append("; ".join(mismatches))
+            mapping.append("Almost Matched"); remarks.append("mismatch"); reason.append("; ".join(mismatches))
         else:
-            mapping.append("matched"); remarks.append("All fields matched"); reason.append("")
+            mapping.append("Matched"); remarks.append("All fields matched"); reason.append("")
 
     out = merged.copy()
     out["Mapping"] = mapping
@@ -567,7 +600,6 @@ def build_pairwise_recon(
 
     pr_cols_all = [c for c in out.columns if c.endswith("_PR")]
     b2_cols_all = [c for c in out.columns if c.endswith("_2B")]
-
     vendor_name_pr = pick_from_list(pr_cols_all, [f"{x}_PR" for x in VENDOR_NAME_PR_CANDIDATES])
     gstr1_status_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in GSTR1_STATUS_2B_CANDIDATES])
 
@@ -582,58 +614,94 @@ def build_pairwise_recon(
     ]
     pair_cols = [c for c in pair_cols if c and c in out.columns]
     keep_extra = [c for c in [vendor_name_pr, gstr1_status_2b] if c and c in out.columns]
-
     front = ["_GST_KEY", "_INV_KEY", "Mapping", "Remarks", "Reason"]
     final_cols = front + pair_cols + keep_extra
-    return out[final_cols], {
+    out = out[final_cols]
+
+    # ---------------- "2B month" using GSTR-1 filing status text ----------------
+    two_b_month_series = ""
+    if gstr1_status_2b and gstr1_status_2b in out.columns:
+        two_b_month_series = out[gstr1_status_2b]
+    out["2B month"] = two_b_month_series
+    return out, {
         "cgst_pr_col": cgst_pr_col, "sgst_pr_col": sgst_pr_col, "igst_pr_col": igst_pr_col,
         "cgst_2b_col": cgst_2b_col, "sgst_2b_col": sgst_2b_col, "igst_2b_col": igst_2b_col,
-        "gstr1_status_2b_col": gstr1_status_2b  # <-- expose for "2B month"
+        "gstr1_status_2b_col": gstr1_status_2b
     }
 
 # -------------------- Dashboard --------------------
-
 def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
-    status_col = "Mapping"
-    statuses = ["matched", "Almost Match", "not matched"]
+    """
+    Dashboard shape:
 
-    def sum_by(status, colname):
-        if not colname or colname not in df_recon.columns:
+    Status |     Matched        |   Almost Matched    |    Not Matched     |       Total
+    Report |  PR   | GSTR 2B     |   PR   | GSTR 2B     |   PR   | GSTR 2B     |   PR   | GSTR 2B
+    CGST
+    SGST
+    IGST
+    Total
+    """
+    # Column names coming from pair_cols
+    cgst_pr = cols.get("cgst_pr_col")
+    sgst_pr = cols.get("sgst_pr_col")
+    igst_pr = cols.get("igst_pr_col")
+    cgst_2b = cols.get("cgst_2b_col")
+    sgst_2b = cols.get("sgst_2b_col")
+    igst_2b = cols.get("igst_2b_col")
+
+    def _sum(series_name: Optional[str], status: Optional[str]) -> float:
+        if not series_name or series_name not in df_recon.columns:
             return 0.0
-        mask = df_recon[status_col].str.lower().eq(status.lower())
-        return float(pd.to_numeric(df_recon.loc[mask, colname], errors="coerce").fillna(0).sum())
+        s = pd.to_numeric(df_recon[series_name], errors="coerce").fillna(0)
+        if status and "Mapping" in df_recon.columns:
+            s = s[df_recon["Mapping"] == status]
+        return float(s.sum())
 
-    def count_by(status):
-        return int((df_recon[status_col].str.lower() == status.lower()).sum())
+    def block(status: Optional[str]) -> dict:
+        # status=None means "Total" across all rows
+        return {
+            ("Matched" if status == "Matched" else
+             "Almost Matched" if status == "Almost Matched" else
+             "Not Matched" if status == "Not Matched" else
+             "Total", "PR"): [
+                _sum(cgst_pr, status),
+                _sum(sgst_pr, status),
+                _sum(igst_pr, status),
+                _sum(cgst_pr, status) + _sum(sgst_pr, status) + _sum(igst_pr, status),
+            ],
+            ("Matched" if status == "Matched" else
+             "Almost Matched" if status == "Almost Matched" else
+             "Not Matched" if status == "Not Matched" else
+             "Total", "GSTR 2B"): [
+                _sum(cgst_2b, status),
+                _sum(sgst_2b, status),
+                _sum(igst_2b, status),
+                _sum(cgst_2b, status) + _sum(sgst_2b, status) + _sum(igst_2b, status),
+            ],
+        }
 
-    rows = []
-    rows.append(["Count (rows)",
-                 count_by("matched"), count_by("Almost Match"), count_by("not matched")])
+    # Assemble the full table
+    rows = ["CGST", "SGST", "IGST", "Total"]
+    data_cols = {}
+    for st in ["Matched", "Almost Matched", "Not Matched", None]:  # None => Total block
+        data_cols.update(block(st))
 
-    cgst_pr = [sum_by(s, cols["cgst_pr_col"]) for s in statuses]
-    sgst_pr = [sum_by(s, cols["sgst_pr_col"]) for s in statuses]
-    igst_pr = [sum_by(s, cols["igst_pr_col"]) for s in statuses]
-    total_pr = [a+b+c for a,b,c in zip(cgst_pr, sgst_pr, igst_pr)]
+    # Left-most "Status/Report" label column
+    left = {("Status", "Report"): rows}
 
-    rows.append(["CGST (PR)"] + cgst_pr)
-    rows.append(["SGST (PR)"] + sgst_pr)
-    rows.append(["IGST (PR)"] + igst_pr)
-    rows.append(["Total Tax (PR)"] + total_pr)
+    # Build MultiIndex DataFrame
+    cols_mi = pd.MultiIndex.from_tuples(
+        list(left.keys()) + list(data_cols.keys()),
+        names=["", ""]
+    )
+    df = pd.DataFrame(
+        list(zip(*([*left.values(), *data_cols.values()])))  # rows of tuples → list of rows
+    )
+    df.columns = cols_mi
+    return df
 
-    cgst_2b = [sum_by(s, cols["cgst_2b_col"]) for s in statuses]
-    sgst_2b = [sum_by(s, cols["sgst_2b_col"]) for s in statuses]
-    igst_2b = [sum_by(s, cols["igst_2b_col"]) for s in statuses]
-    total_2b = [a+b+c for a,b,c in zip(cgst_2b, sgst_2b, igst_2b)]
-
-    rows.append(["CGST (2B)"] + cgst_2b)
-    rows.append(["SGST (2B)"] + sgst_2b)
-    rows.append(["IGST (2B)"] + igst_2b)
-    rows.append(["Total Tax (2B)"] + total_2b)
-
-    return pd.DataFrame(rows, columns=["Metric", "Matched", "Almost Match", "Not Matched"])
 
 # -------------------- Routes --------------------
-
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html")
@@ -650,33 +718,61 @@ def verify_columns():
     tmppr = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
     file_2b.stream.seek(0); tmp2b.write(file_2b.read()); tmp2b.close()
     file_pr.stream.seek(0); tmppr.write(file_pr.read()); tmppr.close()
-
     session["tmp2b"] = tmp2b.name
     session["tmppr"] = tmppr.name
 
+    # Read B2B (required) and B2B-CDNR (optional) using headers in rows 5/6
     wanted_sheets = ["B2B", "B2B-CDNR"]
-    xls_2b = pd.read_excel(tmp2b.name, sheet_name=wanted_sheets, header=[4, 5])
-
     frames = []
-    for _, df in xls_2b.items():
-        df = df.copy()
-        df.columns = flatten_columns(df.columns)
-        df = df.dropna(how="all")
-        if not df.empty:
-            df, _ = normalize_columns(df)  # normalize 2B headers
-            frames.append(df)
-    df_2b_raw = pd.concat(frames, ignore_index=True)
+    # xls = pd.ExcelFile(tmp2b.name)
+    # present_sheets = [sn for sn in wanted_sheets if sn in xls.sheet_names]
 
-    df_pr_raw = pd.read_excel(tmppr.name)
-    df_pr_raw, _ = normalize_columns(df_pr_raw)  # normalize PR headers
+    with pd.ExcelFile(tmp2b.name) as xls:
+        sheet_names = xls.sheet_names
+    present_sheets = [sn for sn in wanted_sheets if sn in sheet_names]
 
-    inv_2b = _pick_column(df_2b_raw, INVOICE_CANDIDATES_2B)
-    gst_2b = _pick_column(df_2b_raw, GSTIN_CANDIDATES_2B)
-    date_2b = _pick_column(df_2b_raw, DATE_CANDIDATES_2B)
-    cgst_2b = _pick_column(df_2b_raw, CGST_CANDIDATES_2B)
-    sgst_2b = _pick_column(df_2b_raw, SGST_CANDIDATES_2B)
-    igst_2b = _pick_column(df_2b_raw, IGST_CANDIDATES_2B)
+    if "B2B" not in present_sheets:
+        flash("Could not find a 'B2B' sheet in the GSTR-2B file.")
+        return redirect(url_for("index"))
 
+    # Load each present sheet separately for detection defaults (no concat yet)
+    df_b2b = None
+    df_cdnr = None
+    if "B2B" in present_sheets:
+        df_b2b = pd.read_excel(tmp2b.name, sheet_name="B2B", header=[4, 5], engine="openpyxl", dtype=str)
+        print("LOCAL B2B COLS:", df_b2b.columns.tolist()[:25])   # 👈 insert here
+        df_b2b = df_b2b.dropna(how="all")
+        df_b2b.columns = flatten_columns(df_b2b.columns)
+        df_b2b, _ = normalize_columns(df_b2b)
+
+    if "B2B-CDNR" in present_sheets:
+        df_cdnr = pd.read_excel(tmp2b.name, sheet_name="B2B-CDNR", header=[4, 5], engine="openpyxl", dtype=str)
+        print("LOCAL CDNR COLS:", df_cdnr.columns.tolist()[:25])  # 👈 insert here
+        df_cdnr = df_cdnr.dropna(how="all")
+        df_cdnr.columns = flatten_columns(df_cdnr.columns)
+        df_cdnr, _ = normalize_columns(df_cdnr)
+
+    df_pr_raw = pd.read_excel(tmppr.name, engine="openpyxl", dtype=str)
+    print("LOCAL PR COLS:", df_pr_raw.columns.tolist()[:25])      # 👈 insert here
+    df_pr_raw, _ = normalize_columns(df_pr_raw)
+
+    # ---- Detection for B2B (invoice-based) ----
+    inv_2b_b2b = _pick_column(df_b2b, INVOICE_CANDIDATES_2B) if df_b2b is not None else None
+    gst_2b_b2b = _pick_column(df_b2b, GSTIN_CANDIDATES_2B) if df_b2b is not None else None
+    date_2b_b2b = _pick_column(df_b2b, DATE_CANDIDATES_2B) if df_b2b is not None else None
+    cgst_2b_b2b = _pick_column(df_b2b, CGST_CANDIDATES_2B) if df_b2b is not None else None
+    sgst_2b_b2b = _pick_column(df_b2b, SGST_CANDIDATES_2B) if df_b2b is not None else None
+    igst_2b_b2b = _pick_column(df_b2b, IGST_CANDIDATES_2B) if df_b2b is not None else None
+
+    # ---- Detection for CDNR (note-based) ----
+    note_2b_cdnr = _pick_column(df_cdnr, NOTE_NO_CANDIDATES_2B) if df_cdnr is not None else None
+    notedate_2b_cdnr = _pick_column(df_cdnr, NOTE_DATE_CANDIDATES_2B) if df_cdnr is not None else None
+    gst_2b_cdnr = _pick_column(df_cdnr, GSTIN_CANDIDATES_2B) if df_cdnr is not None else None
+    cgst_2b_cdnr = _pick_column(df_cdnr, CGST_CANDIDATES_2B) if df_cdnr is not None else None
+    sgst_2b_cdnr = _pick_column(df_cdnr, SGST_CANDIDATES_2B) if df_cdnr is not None else None
+    igst_2b_cdnr = _pick_column(df_cdnr, IGST_CANDIDATES_2B) if df_cdnr is not None else None
+
+    # ---- Detection for PR ----
     inv_pr = _pick_column(df_pr_raw, INVOICE_CANDIDATES_PR, avoid_terms=AVOID_DOC_LIKE_FOR_PR,
                           extra_penalties=["gstin", "company", "recipient"])
     gst_pr = _pick_column(df_pr_raw, GSTIN_CANDIDATES_PR, extra_penalties=AVOID_RECIPIENT_GSTIN_FOR_PR)
@@ -692,37 +788,141 @@ def verify_columns():
         guess = pick_invoice_by_values(df_pr_raw)
         if guess: inv_pr = guess
 
-    cols_2b = sorted(df_2b_raw.columns)
+    cols_b2b = sorted(df_b2b.columns) if df_b2b is not None else []
+    cols_cdnr = sorted(df_cdnr.columns) if df_cdnr is not None else []
     cols_pr = sorted(df_pr_raw.columns)
 
     return render_template(
         "verify.html",
-        cols_2b=cols_2b, cols_pr=cols_pr,
-        inv_2b=inv_2b, gst_2b=gst_2b, date_2b=date_2b, cgst_2b=cgst_2b, sgst_2b=sgst_2b, igst_2b=igst_2b,
-        inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr
+        # PR
+        cols_pr=cols_pr,
+        inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr,
+        # B2B
+        cols_2b_b2b=cols_b2b,
+        inv_2b_b2b=inv_2b_b2b, gst_2b_b2b=gst_2b_b2b, date_2b_b2b=date_2b_b2b,
+        cgst_2b_b2b=cgst_2b_b2b, sgst_2b_b2b=sgst_2b_b2b, igst_2b_b2b=igst_2b_b2b,
+        # CDNR
+        cols_2b_cdnr=cols_cdnr,
+        note_2b_cdnr=note_2b_cdnr, notedate_2b_cdnr=notedate_2b_cdnr, gst_2b_cdnr=gst_2b_cdnr,
+        cgst_2b_cdnr=cgst_2b_cdnr, sgst_2b_cdnr=sgst_2b_cdnr, igst_2b_cdnr=igst_2b_cdnr,
+        has_cdnr=("B2B-CDNR" in present_sheets)
     )
 
 # ------- Extracted heavy logic into a helper so the worker can call it -------
-def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
-                                 inv_2b_sel: str, gst_2b_sel: str, date_2b_sel: str, cgst_2b_sel: str, sgst_2b_sel: str, igst_2b_sel: str,
-                                 inv_pr_sel: str, gst_pr_sel: str, date_pr_sel: str, cgst_pr_sel: str, sgst_pr_sel: str, igst_pr_sel: str) -> bytes:
-    # Reload sheets
-    wanted_sheets = ["B2B", "B2B-CDNR"]
-    xls_2b = pd.read_excel(tmp2b_path, sheet_name=wanted_sheets, header=[4, 5])
-    frames = []
-    for _, df in xls_2b.items():
-        df = df.copy()
-        df.columns = flatten_columns(df.columns)
-        df = df.dropna(how="all")
-        if not df.empty:
-            df, _ = normalize_columns(df)  # normalize 2B headers
-            frames.append(df)
-    df_2b_raw = pd.concat(frames, ignore_index=True)
 
-    df_pr_raw = pd.read_excel(tmppr_path)
+# ---------- helpers (keep these near the other helpers) ----------
+def _pick_best_note_col(df: pd.DataFrame, primary: Optional[str]) -> Optional[str]:
+    """For CDNR: if the chosen note column is missing or >70% blank, pick a better one."""
+    if df is None or df.empty:
+        return primary
+    def non_empty_ratio(col):
+        if col not in df.columns:
+            return 0.0
+        s = df[col].astype(str).str.strip()
+        return (s != "").mean()
+    if (not primary) or (non_empty_ratio(primary) < 0.30):
+        best_col, best_score = None, 0.0
+        for c in NOTE_NO_CANDIDATES_2B:
+            if c in df.columns:
+                sc = non_empty_ratio(c)
+                if sc > best_score:
+                    best_col, best_score = c, sc
+        return best_col or primary
+    return primary
+
+def _rescue_empty_inv_keys(df: pd.DataFrame, inv_col: str) -> pd.DataFrame:
+    """
+    After consolidate_by_key, ensure _INV_KEY is not empty/NaN for CDNR rows.
+    - If empty/NaN, rebuild _INV_KEY from inv_col via inv_basic()
+    - If still empty, assign a row-unique placeholder to prevent GSTIN-level collapse.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+
+    def _is_empty_key(s: pd.Series) -> pd.Series:
+        return s.isna() | (s.astype(str).str.strip() == "")
+
+    mask_empty = _is_empty_key(df["_INV_KEY"])
+
+    if mask_empty.any() and inv_col in df.columns:
+        df.loc[mask_empty, "_INV_KEY"] = df.loc[mask_empty, inv_col].map(inv_basic)
+
+    mask_still = _is_empty_key(df["_INV_KEY"])
+    if mask_still.any():
+        df.loc[mask_still, "_INV_KEY"] = df.index[mask_still].map(lambda i: f"__CDNR_ROW__{i}__")
+
+    return df
+
+def _append_if_missing(target_list: List[str], candidates: List[Optional[str]]) -> None:
+    """Avoids any 'must not in …' parsing weirdness and keeps linters happy."""
+    for c in candidates:
+        if c and (c not in target_list):
+            target_list.append(c)
+
+
+def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
+                                 # B2B (invoice-based)
+                                 inv_2b_b2b_sel: str, gst_2b_b2b_sel: str, date_2b_b2b_sel: str, cgst_2b_b2b_sel: str, sgst_2b_b2b_sel: str, igst_2b_b2b_sel: str,
+                                 # CDNR (note-based)
+                                 note_2b_cdnr_sel: str, gst_2b_cdnr_sel: str, notedate_2b_cdnr_sel: str, cgst_2b_cdnr_sel: str, sgst_2b_cdnr_sel: str, igst_2b_cdnr_sel: str,
+                                 # PR
+                                 inv_pr_sel: str, gst_pr_sel: str, date_pr_sel: str, cgst_pr_sel: str, sgst_pr_sel: str, igst_pr_sel: str) -> bytes:
+
+    # Read sheets with header rows 5/6 (index 4,5)
+    # xls = pd.ExcelFile(tmp2b_path)
+    # has_b2b = "B2B" in xls.sheet_names
+    # has_cdnr = "B2B-CDNR" in xls.sheet_names
+    with pd.ExcelFile(tmp2b_path) as xls:
+        sheet_names = set(xls.sheet_names)
+    has_b2b = "B2B" in sheet_names
+    has_cdnr = "B2B-CDNR" in sheet_names
+    if not has_b2b:
+        raise ValueError("Could not find a 'B2B' sheet in the GSTR-2B file.")
+
+    def load_sheet(name):
+        df = pd.read_excel(tmp2b_path, sheet_name=name, header=[4, 5])
+        df = df.dropna(how="all")
+        if df.empty:
+            return df
+        df.columns = flatten_columns(df.columns)
+        df, _ = normalize_columns(df)
+        df["_SOURCE_SHEET"] = name
+        return df
+
+    df_b2b_raw = load_sheet("B2B") if has_b2b else pd.DataFrame()
+    df_cdnr_raw = load_sheet("B2B-CDNR") if has_cdnr else pd.DataFrame()
+
+    df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)  # normalize PR headers, keep map
 
-    # ---- Robust fallback: normalized selection must match ANY header ----
+    # ---------------- Apply sign logic for B2B & CDNR ----------------
+    def apply_signs(df):
+        if df.empty:
+            return df
+        df = df.copy()
+        def get_note_type(row):
+            inv = as_text(row.get(INVOICE_CANDIDATES_2B[0], "") if INVOICE_CANDIDATES_2B else "")
+            if "credit" in inv.lower() or "cr" in inv.lower():
+                return "credit"
+            if "debit" in inv.lower() or "dr" in inv.lower():
+                return "debit"
+            if row.get("_SOURCE_SHEET") == "B2B-CDNR":
+                return "credit"
+            return "invoice"
+        df["_NOTE_TYPE"] = df.apply(get_note_type, axis=1)
+        numeric_cols = [c for c in (
+            CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B +
+            TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B + INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
+        ) if c in df.columns]
+        for col in numeric_cols:
+            df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
+        return df
+
+    df_b2b_raw = apply_signs(df_b2b_raw)
+    df_cdnr_raw = apply_signs(df_cdnr_raw)
+
+    # ---- normalized selection must match ANY header (robust) ----
     def match_provided(df: pd.DataFrame, provided: str) -> Optional[str]:
         if not provided:
             return None
@@ -735,6 +935,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         return None
 
     def ensure_col(df, provided, candidates, avoid=None, penalties=None, value_picker=None):
+        if df is None or df.empty:
+            return None
         col = match_provided(df, provided)
         if col and col in df.columns:
             return col
@@ -747,13 +949,41 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                 return guess
         return None
 
-    inv_2b = ensure_col(df_2b_raw, inv_2b_sel, INVOICE_CANDIDATES_2B)
-    gst_2b = ensure_col(df_2b_raw, gst_2b_sel, GSTIN_CANDIDATES_2B)
-    date_2b = ensure_col(df_2b_raw, date_2b_sel, DATE_CANDIDATES_2B)
-    cgst_2b = ensure_col(df_2b_raw, cgst_2b_sel, CGST_CANDIDATES_2B)
-    sgst_2b = ensure_col(df_2b_raw, sgst_2b_sel, SGST_CANDIDATES_2B)
-    igst_2b = ensure_col(df_2b_raw, igst_2b_sel, IGST_CANDIDATES_2B)
+    # ---------- CDNR strong substring picks (helps PyCharm infer flow too) ----------
+    def _pick_col_contains(df, pattern):
+        if df is None:
+            return None
+        pat = re.compile(pattern, re.I)
+        for c in df.columns:
+            if pat.search(str(c)):
+                return c
+        return None
+    cdnr_note_hard  = _pick_col_contains(df_cdnr_raw, r"\bnote\s*number\b")
+    cdnr_ndate_hard = _pick_col_contains(df_cdnr_raw, r"\bnote\s*date\b")
 
+    # --- Resolve columns for B2B (invoice-based) ---
+    inv_2b_b2b = ensure_col(df_b2b_raw, inv_2b_b2b_sel, INVOICE_CANDIDATES_2B)
+    gst_2b_b2b = ensure_col(df_b2b_raw, gst_2b_b2b_sel, GSTIN_CANDIDATES_2B)
+    date_2b_b2b = ensure_col(df_b2b_raw, date_2b_b2b_sel, DATE_CANDIDATES_2B)
+    cgst_2b_b2b = ensure_col(df_b2b_raw, cgst_2b_b2b_sel, CGST_CANDIDATES_2B)
+    sgst_2b_b2b = ensure_col(df_b2b_raw, sgst_2b_b2b_sel, SGST_CANDIDATES_2B)
+    igst_2b_b2b = ensure_col(df_b2b_raw, igst_2b_b2b_sel, IGST_CANDIDATES_2B)
+
+    # --- Resolve columns for CDNR (note-based) ---
+    note_2b_cdnr     = ensure_col(df_cdnr_raw, note_2b_cdnr_sel, NOTE_NO_CANDIDATES_2B)
+    notedate_2b_cdnr = ensure_col(df_cdnr_raw, notedate_2b_cdnr_sel, NOTE_DATE_CANDIDATES_2B)
+    if cdnr_note_hard:
+        note_2b_cdnr = cdnr_note_hard
+    if cdnr_ndate_hard:
+        notedate_2b_cdnr = cdnr_ndate_hard
+    note_2b_cdnr = _pick_best_note_col(df_cdnr_raw, note_2b_cdnr)
+
+    gst_2b_cdnr = ensure_col(df_cdnr_raw, gst_2b_cdnr_sel, GSTIN_CANDIDATES_2B)
+    cgst_2b_cdnr = ensure_col(df_cdnr_raw, cgst_2b_cdnr_sel, CGST_CANDIDATES_2B)
+    sgst_2b_cdnr = ensure_col(df_cdnr_raw, sgst_2b_cdnr_sel, SGST_CANDIDATES_2B)
+    igst_2b_cdnr = ensure_col(df_cdnr_raw, igst_2b_cdnr_sel, IGST_CANDIDATES_2B)
+
+    # --- Resolve columns for PR ---
     gst_pr = ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
                         penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
                         value_picker=lambda d: pick_gstin_by_values(d, prefer_supplier=True))
@@ -766,35 +996,116 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     sgst_pr = ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
     igst_pr = ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
 
-    optional_numeric_2b = []
-    for pool in [[ "taxable value","taxable amount","assessable value","taxable" ],
-                 [ "total tax","total tax amount","tax amount" ],
-                 [ "invoice value","total invoice value","value of invoice","invoice total" ],
-                 [ "cess","cess amount" ]]:
-        col = _find_optional_col(df_2b_raw, [pool]);  optional_numeric_2b.append(col) if col else None
-    for must in [cgst_2b, sgst_2b, igst_2b]:
-        if must and must not in optional_numeric_2b: optional_numeric_2b.append(must)
+    # ==== DEBUG: column resolution sanity (TEMP – remove after testing) ====
+    print("RESOLVED COLUMNS ->",
+          "\n  B2B:", inv_2b_b2b, gst_2b_b2b, date_2b_b2b, cgst_2b_b2b, sgst_2b_b2b, igst_2b_b2b,
+          "\n  CDNR:", note_2b_cdnr, gst_2b_cdnr, notedate_2b_cdnr, cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr,
+          "\n  PR:", inv_pr, gst_pr, date_pr, cgst_pr, sgst_pr, igst_pr)
 
-    optional_numeric_pr = []
-    for pool in [[ "taxable value","taxable amount","assessable value","taxable" ],
-                 [ "total tax","total tax amount","tax amount" ],
-                 [ "invoice value","total invoice value","value of invoice","invoice total" ],
-                 [ "cess","cess amount" ]]:
-        col = _find_optional_col(df_pr_raw, [pool]);  optional_numeric_pr.append(col) if col else None
-    for must in [cgst_pr, sgst_pr, igst_pr]:
-        if must and must not in optional_numeric_pr: optional_numeric_pr.append(must)
+    def _exists(df, name):
+        return bool(name) and (name in df.columns)
 
-    # Consolidated by key for recon
-    df_2b = consolidate_by_key(df=df_2b_raw, gstin_col=gst_2b, inv_col=inv_2b, date_col=date_2b, numeric_cols=optional_numeric_2b)
-    df_pr = consolidate_by_key(df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr, date_col=date_pr, numeric_cols=optional_numeric_pr)
+    print("EXISTENCE CHECK ->",
+          "\n  B2B:", _exists(df_b2b_raw, inv_2b_b2b), _exists(df_b2b_raw, gst_2b_b2b), _exists(df_b2b_raw, date_2b_b2b),
+          _exists(df_b2b_raw, cgst_2b_b2b), _exists(df_b2b_raw, sgst_2b_b2b), _exists(df_b2b_raw, igst_2b_b2b),
+          "\n  CDNR:", _exists(df_cdnr_raw, note_2b_cdnr), _exists(df_cdnr_raw, gst_2b_cdnr), _exists(df_cdnr_raw, notedate_2b_cdnr),
+          _exists(df_cdnr_raw, cgst_2b_cdnr), _exists(df_cdnr_raw, sgst_2b_cdnr), _exists(df_cdnr_raw, igst_2b_cdnr),
+          "\n  PR:", _exists(df_pr_raw, inv_pr), _exists(df_pr_raw, gst_pr), _exists(df_pr_raw, date_pr),
+          _exists(df_pr_raw, cgst_pr), _exists(df_pr_raw, sgst_pr), _exists(df_pr_raw, igst_pr))
 
+    def _nn(df, c):
+        if not c or c not in df.columns:
+            return -1
+        return int(pd.Series(df[c]).astype(str).str.strip().ne("").sum())
+
+    print("NON-NULL COUNTS ->",
+          "\n  PR:", inv_pr, _nn(df_pr_raw, inv_pr), "|", gst_pr, _nn(df_pr_raw, gst_pr),
+          "\n  B2B:", inv_2b_b2b, _nn(df_b2b_raw, inv_2b_b2b), "|", gst_2b_b2b, _nn(df_b2b_raw, gst_2b_b2b),
+          "\n  CDNR:", note_2b_cdnr, _nn(df_cdnr_raw, note_2b_cdnr), "|", gst_2b_cdnr, _nn(df_cdnr_raw, gst_2b_cdnr))
+    # ==== /DEBUG ====
+
+
+    # ---------------- Optional numeric columns ----------------
+    def optional_numeric_list(df_):
+        res = []
+        for pool in [[ "taxable value","taxable amount","assessable value","taxable" ],
+                     [ "total tax","total tax amount","tax amount" ],
+                     [ "invoice value","total invoice value","value of invoice","invoice total" ],
+                     [ "cess","cess amount" ]]:
+            col = _find_optional_col(df_, [pool])
+            if df_ is not None and not df_.empty and col:
+                res.append(col)
+        return res
+
+    opt_2b_b2b = optional_numeric_list(df_b2b_raw)
+    _append_if_missing(opt_2b_b2b, [cgst_2b_b2b, sgst_2b_b2b, igst_2b_b2b])
+
+    opt_2b_cdnr = optional_numeric_list(df_cdnr_raw)
+    _append_if_missing(opt_2b_cdnr, [cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr])
+
+    opt_pr = optional_numeric_list(df_pr_raw)
+    _append_if_missing(opt_pr, [cgst_pr, sgst_pr, igst_pr])
+
+    # ---------------- Consolidate ----------------
+    df_2b_b2b = consolidate_by_key(
+        df=df_b2b_raw, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b,
+        date_col=date_2b_b2b, numeric_cols=opt_2b_b2b
+    ) if (df_b2b_raw is not None and not df_b2b_raw.empty and inv_2b_b2b and gst_2b_b2b) else pd.DataFrame()
+
+    df_2b_cdnr = consolidate_by_key(
+        df=df_cdnr_raw, gstin_col=gst_2b_cdnr, inv_col=note_2b_cdnr,
+        date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr
+    ) if (df_cdnr_raw is not None and not df_cdnr_raw.empty and note_2b_cdnr and gst_2b_cdnr) else pd.DataFrame()
+
+    # Ensure CDNR has non-empty _INV_KEY (Note Number) so it never collapses at GSTIN level
+    if not df_2b_cdnr.empty:
+        df_2b_cdnr = _rescue_empty_inv_keys(df_2b_cdnr, inv_col=note_2b_cdnr)
+
+        # -------- debug prints you asked for --------
+        print("CDNR Note column picked:", note_2b_cdnr)
+        print("CDNR Note date column:", notedate_2b_cdnr)
+        pct_empty = (
+            (df_2b_cdnr["_INV_KEY"].astype(str).str.strip() == "") |
+            (df_2b_cdnr["_INV_KEY"].isna())
+        ).mean()
+        print(f"CDNR empty _INV_KEY %: {pct_empty:.2%}")
+        try:
+            cols_to_show = ["_GST_KEY", "_INV_KEY"]
+            if note_2b_cdnr in df_2b_cdnr.columns:
+                cols_to_show.append(note_2b_cdnr)
+            print(df_2b_cdnr.head(5)[cols_to_show])
+        except Exception:
+            pass
+        # --------------------------------------------
+
+    df_pr = consolidate_by_key(
+        df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr,
+        date_col=date_pr, numeric_cols=opt_pr
+    )
+
+    # ---------- display columns (Invoice vs Note) ----------
+    def add_display_cols(df_, inv_col, date_col, source_tag):
+        if df_.empty:
+            return df_
+        df = df_.copy()
+        df["_INV_DISPLAY"] = df[inv_col] if inv_col in df.columns else ""
+        df["_DATE_DISPLAY"] = df[date_col] if date_col and date_col in df.columns else ""
+        df["_DISPLAY_SOURCE"] = source_tag
+        return df
+
+    df_2b_b2b = add_display_cols(df_2b_b2b, inv_2b_b2b, date_2b_b2b, "B2B")
+    df_2b_cdnr = add_display_cols(df_2b_cdnr, note_2b_cdnr, notedate_2b_cdnr, "B2B-CDNR")
+    df_2b = pd.concat([df_2b_b2b, df_2b_cdnr], ignore_index=True) if (not df_2b_b2b.empty or not df_2b_cdnr.empty) else df_2b_b2b
+
+    # ---------- build pairwise recon (this shows Note No under "Invoice Number (2B)") ----------
     combined_df, pair_cols = build_pairwise_recon(
         df_pr=df_pr, df_2b=df_2b,
         inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr,
-        inv_2b=inv_2b, gst_2b=gst_2b, date_2b=date_2b, cgst_2b=cgst_2b, sgst_2b=sgst_2b, igst_2b=igst_2b
+        inv_2b="_INV_DISPLAY", gst_2b=(gst_2b_b2b or gst_2b_cdnr), date_2b="_DATE_DISPLAY",
+        cgst_2b=(cgst_2b_b2b or cgst_2b_cdnr), sgst_2b=(sgst_2b_b2b or sgst_2b_cdnr), igst_2b=(igst_2b_b2b or igst_2b_cdnr)
     )
 
-    # ---------------- NEW: PR - Comments sheet data ----------------
+    # ---------------- PR - Comments sheet data ----------------
     recon_lookup = {}
     for _, row in combined_df.iterrows():
         key = (as_text(row.get("_GST_KEY", "")), as_text(row.get("_INV_KEY", "")))
@@ -813,175 +1124,207 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
 
-    # ---------------- Prepare Dashboard (transposed) ----------------
+    # ---------------- Dashboard (transposed) ----------------
     dashboard_df = build_dashboard(combined_df, pair_cols)
-    dashboard_tx = dashboard_df.set_index("Metric").T.reset_index()
-    dashboard_tx.rename(columns={"index": "Status"}, inplace=True)
+    dashboard_tx = dashboard_df.set_index("Status").reset_index()
 
     # ---------------- Add extra columns to Reconciliation ----------------
-    gstr1_col = pair_cols.get("gstr1_status_2b_col", None)
-    two_b_month_series = combined_df[gstr1_col] if gstr1_col and gstr1_col in combined_df.columns else ""
-    combined_df["2B month"] = two_b_month_series
-    combined_df["Eligibility"] = ""
-    combined_df["User Remarks"] = ""
+    # Add Invoice Type (from B2B sheet) and Note Type (from CDNR sheet)
+    invoice_type_map = df_2b_b2b.set_index(["_GST_KEY", "_INV_KEY"]).get("_SOURCE_SHEET", pd.Series()).to_dict() \
+        if not df_2b_b2b.empty else {}
+    note_type_map = df_2b_cdnr.set_index(["_GST_KEY", "_INV_KEY"]).get("_NOTE_TYPE", pd.Series()).to_dict() \
+        if not df_2b_cdnr.empty else {}
+
+    combined_df["Invoice Type"] = combined_df.apply(
+        lambda r: invoice_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), ""), axis=1)
+    combined_df["Note Type"] = combined_df.apply(
+        lambda r: note_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), ""), axis=1)
+
+    # Re-order columns: place after _INV_KEY
+    cols = list(combined_df.columns)
+    if "Invoice Type" in cols and "Note Type" in cols:
+        idx = cols.index("_INV_KEY") + 1
+        for c in ["Note Type", "Invoice Type"][::-1]:
+            cols.insert(idx, cols.pop(cols.index(c)))
+        combined_df = combined_df[cols]
+
+    # --------- FAST XLSX WRITER (XlsxWriter) ---------
+    def _autosize_ws(ws, df, min_w=12, max_w=48):
+        sample = df.head(200)
+        for col_idx, col_name in enumerate(df.columns):
+            header_len = len(str(col_name)) + 4
+            try:
+                content_len = int(sample[col_name].astype(str).map(len).max())
+                # guard: content_len may be NaN if col not in sample
+                if isinstance(content_len, float) and math.isnan(content_len):
+                    content_len = 0
+            except Exception:
+                content_len = 0
+            width = max(min_w, min(max_w, max(header_len, content_len + 2)))
+            ws.set_column(col_idx, col_idx, width)
 
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Reconciliation
-        # ---------------- Reconciliation (no conditional formatting) ----------------
-        sheet_name = "Reconciliation"
-        combined_df.to_excel(writer, index=False, sheet_name=sheet_name)
-
-        from openpyxl.styles import Font, PatternFill, Alignment
-        from openpyxl.utils import get_column_letter
-        from openpyxl.formatting.rule import FormulaRule
-
+    with pd.ExcelWriter(
+        output,
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_urls": False}},  # ← just remove constant_memory
+    ) as writer:
         wb = writer.book
-        ws = wb[sheet_name]
+        header_fmt = wb.add_format({"bold": True})
 
-        # Header style (keep)
-        header_fill = PatternFill("solid", fgColor="000000")
-        header_font = Font(color="FFA500", bold=True)
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(vertical="center")
+        # ---------------- Reconciliation ----------------
+        combined_df.to_excel(writer, index=False, sheet_name="Reconciliation")
+        ws = writer.sheets["Reconciliation"]
+        ws.freeze_panes(1, 0)
+        ws.autofilter(0, 0, len(combined_df), max(0, combined_df.shape[1] - 1))
+        ws.set_row(0, None, header_fmt)
+        _autosize_ws(ws, combined_df)
 
-        # Usability tweaks (keep)
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
+        # ---------------- Dashboard (manual two-row header; MI-safe) ----------------
+        ws2 = writer.book.add_worksheet("Dashboard")
+        writer.sheets["Dashboard"] = ws2
 
-        for idx, cell in enumerate(ws[1], start=1):
-            header_len = len(str(cell.value)) if cell.value else 8
-            ws.column_dimensions[get_column_letter(idx)].width = min(max(header_len + 6, 14), 48)
+        # Formats
+        hdr_bold = header_fmt  # from above
+        num_fmt  = wb.add_format({"num_format": "#,##0.00"})
 
-        headers = {str(c.value).strip(): i+1 for i, c in enumerate(ws[1])}
-        map_c = headers.get("Mapping"); rem_c = headers.get("Remarks")
+        # Helpers to sum values
+        def _sum_component(status, col_name):
+            if not col_name or col_name not in combined_df.columns:
+                return 0.0
+            mask = (combined_df["Mapping"] == status) if status else slice(None)
+            return float(pd.to_numeric(combined_df.loc[mask, col_name], errors="coerce").fillna(0).sum())
 
-        if map_c:
-            last_row = ws.max_row
-            map_col = get_column_letter(map_c)
-            rem_col = get_column_letter(rem_c) if rem_c else None
-            data_range = f"A2:{get_column_letter(ws.max_column)}{last_row}"
+        def _block_vals(status):
+            # status=None => total across all rows
+            cg_pr = _sum_component(status, pair_cols.get("cgst_pr_col"))
+            sg_pr = _sum_component(status, pair_cols.get("sgst_pr_col"))
+            ig_pr = _sum_component(status, pair_cols.get("igst_pr_col"))
+            tot_pr = cg_pr + sg_pr + ig_pr
 
-            green = PatternFill("solid", fgColor="C6EFCE")
-            yellow = PatternFill("solid", fgColor="FFF2CC")
-            red = PatternFill("solid", fgColor="F8CBAD")
-            blue = PatternFill("solid", fgColor="CFE2F3")
+            cg_2b = _sum_component(status, pair_cols.get("cgst_2b_col"))
+            sg_2b = _sum_component(status, pair_cols.get("sgst_2b_col"))
+            ig_2b = _sum_component(status, pair_cols.get("igst_2b_col"))
+            tot_2b = cg_2b + sg_2b + ig_2b
 
-            ws.conditional_formatting.add(
-                data_range, FormulaRule(formula=[f'$${map_col}2="matched"'.replace("$$", "$")], fill=green)
-            )
-            ws.conditional_formatting.add(
-                data_range, FormulaRule(formula=[f'$${map_col}2="Almost Match"'.replace("$$", "$")], fill=yellow)
-            )
-            if rem_col:
-                ws.conditional_formatting.add(
-                    data_range, FormulaRule(formula=[f'LOWER($${rem_col}2)="missing in pr"'.replace("$$", "$")], fill=red)
-                )
-                ws.conditional_formatting.add(
-                    data_range, FormulaRule(formula=[f'LOWER($${rem_col}2)="missing in 2b"'.replace("$$", "$")], fill=blue)
-                )
+            # returns rows CGST, SGST, IGST, Total for PR and GSTR2B
+            return ([cg_pr, sg_pr, ig_pr, tot_pr], [cg_2b, sg_2b, ig_2b, tot_2b])
 
-        # Dashboard (TRANSPOSED)
-        # ---- Removed: All conditional formatting on data_range (Mapping/Remarks) ----
-        # (We intentionally do nothing here to avoid slow openpyxl rules.)
+        statuses = ["Matched", "Almost Matched", "Not Matched", None]  # None => "Total"
+        subhdrs  = ["PR", "GSTR 2B"]
+        rowlabels = ["CGST", "SGST", "IGST", "Total"]
 
-        # ---------------- Dashboard (no per-cell coloring) ----------------
-        dash_name = "Dashboard"
-        dashboard_tx.to_excel(writer, index=False, sheet_name=dash_name)
-        ws2 = wb[dash_name]
+        # Header row 0: "Status" | each status merged over 2 cols
+        ws2.write(0, 0, "Status", hdr_bold)
+        col = 1
+        for st in statuses:
+            title = "Total" if st is None else st
+            ws2.merge_range(0, col, 0, col+1, title, hdr_bold)
+            col += 2
 
-        head_fill = PatternFill("solid", fgColor="000000")
-        head_font = Font(color="FFA500", bold=True)
-        # Header style (keep)
-        for cell in ws2[1]:
-            cell.fill = head_fill
-            cell.font = head_font
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(vertical="center")
+        # Header row 1: "Report" | subheaders PR, GSTR 2B per status
+        ws2.write(1, 0, "Report", hdr_bold)
+        col = 1
+        for _ in statuses:
+            ws2.write(1, col,     "PR",      hdr_bold)
+            ws2.write(1, col + 1, "GSTR 2B", hdr_bold)
+            col += 2
 
-        for col_idx in range(2, ws2.max_column + 1):
-            hdr = str(ws2.cell(row=1, column=col_idx).value or "")
-            color = None
-            if "Matched" in hdr: color = "C6EFCE"
-            elif "Almost" in hdr: color = "FFF2CC"
-            elif "Not Matched" in hdr: color = "F8CBAD"
-            if color:
-                fill = PatternFill("solid", fgColor=color)
-                for r in range(2, ws2.max_row + 1):
-                    ws2.cell(row=r, column=col_idx).fill = fill
+        # Body: row labels + values
+        for r, label in enumerate(rowlabels, start=2):
+            ws2.write(r, 0, label, hdr_bold)
 
-        from openpyxl.utils import get_column_letter
-        # Column widths for dashboard (keep)
-        for idx, cell in enumerate(ws2[1], start=1):
-            ws2.column_dimensions[get_column_letter(idx)].width = 22 if idx == 1 else 18
+        col = 1
+        for st in statuses:
+            pr_vals, b2_vals = _block_vals(st)
+            for r, v in enumerate(pr_vals, start=2):
+                ws2.write_number(r, col, v, num_fmt)
+            for r, v in enumerate(b2_vals, start=2):
+                ws2.write_number(r, col+1, v, num_fmt)
+            col += 2
 
-        # PR - Comments sheet
-        # ---- Removed: the nested loop that filled every data cell by header color ----
-        # (This was the biggest write-time cost.)
+        # Freeze panes under the two header rows
+        ws2.freeze_panes(2, 0)
 
-        # ---------------- PR - Comments (unchanged, no conditional formatting) ----------------
-        prc_name = "PR - Comments"
-        pr_comments.to_excel(writer, index=False, sheet_name=prc_name)
-        ws3 = wb[prc_name]
-        for cell in ws3[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(vertical="center")
-        ws3.freeze_panes = "A2"
-        ws3.auto_filter.ref = ws3.dimensions
-        for idx, cell in enumerate(ws3[1], start=1):
-            header_len = len(str(cell.value)) if cell.value else 8
-            ws3.column_dimensions[get_column_letter(idx)].width = min(max(header_len + 6, 14), 48)
+        # Autosize columns (simple)
+        for c in range(0, 1 + len(statuses)*2):
+            ws2.set_column(c, c, 14)
+        ws2.set_column(0, 0, 12)  # "Status" column a bit narrower
+
+
+        # ---------------- PR - Comments ----------------
+        pr_comments.to_excel(writer, index=False, sheet_name="PR - Comments")
+        ws3 = writer.sheets["PR - Comments"]
+        ws3.freeze_panes(1, 0)
+        ws3.autofilter(0, 0, len(pr_comments), max(0, pr_comments.shape[1] - 1))
+        ws3.set_row(0, None, header_fmt)
+        _autosize_ws(ws3, pr_comments)
 
     output.seek(0)
     return output.read()
 
-
 # ------- NEW: Background worker task (called by RQ) -------
-def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:
-    job = get_current_job()
-    if job:
-        job.meta["progress"] = {"pct": 5, "msg": "Downloading"}
-        job.save_meta()
+from rq import get_current_job
+import tempfile, os, time
+from concurrent.futures import ThreadPoolExecutor
 
+def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:
+    """
+    Faster version:
+      • Parallel downloads (2B + PR)
+      • Clear progress updates
+      • Timing logs in worker output
+    """
+    def _mark(pct, msg):
+        j = get_current_job()
+        if j:
+            j.meta["progress"] = {"pct": int(pct), "msg": msg}
+            j.save_meta()
+        print(f"[{time.strftime('%H:%M:%S')}] {pct}% - {msg}", flush=True)
+
+    t0 = time.time()
+    _mark(3, "Starting")
     with tempfile.TemporaryDirectory() as td:
         in2b = os.path.join(td, "gstr2b.xlsx")
         inpr = os.path.join(td, "purchase_register.xlsx")
-        download_from_drive(drive_id_2b, in2b)
-        download_from_drive(drive_id_pr, inpr)
 
-        if job:
-            job.meta["progress"] = {"pct": 30, "msg": "Reconciling"}
-            job.save_meta()
+        # ---- Download both files concurrently (overlap network I/O) ----
+        _mark(5, "Downloading inputs from Drive")
+        def _dl(fid, path):
+            download_from_drive(fid, path)
+            return path
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut2b = ex.submit(_dl, drive_id_2b, in2b)
+            futpr = ex.submit(_dl, drive_id_pr, inpr)
+            fut2b.result()
+            futpr.result()
+        _mark(22, f"Downloads finished in {time.time()-t0:.1f}s")
 
+        # ---- Reconcile + build XLSX (XlsxWriter used inside pipeline) ----
+        _mark(30, "Reconciling")
         x = selections
         blob = _run_reconciliation_pipeline(
             in2b, inpr,
-            x.get("inv_2b",""), x.get("gst_2b",""), x.get("date_2b",""), x.get("cgst_2b",""), x.get("sgst_2b",""), x.get("igst_2b",""),
+            # B2B
+            x.get("inv_2b_b2b",""), x.get("gst_2b_b2b",""), x.get("date_2b_b2b",""), x.get("cgst_2b_b2b",""), x.get("sgst_2b_b2b",""), x.get("igst_2b_b2b",""),
+            # CDNR
+            x.get("note_2b_cdnr",""), x.get("gst_2b_cdnr",""), x.get("notedate_2b_cdnr",""), x.get("cgst_2b_cdnr",""), x.get("sgst_2b_cdnr",""), x.get("igst_2b_cdnr",""),
+            # PR
             x.get("inv_pr",""), x.get("gst_pr",""), x.get("date_pr",""), x.get("cgst_pr",""), x.get("sgst_pr",""), x.get("igst_pr","")
         )
+        _mark(82, f"Reconcile+write took {time.time()-t0:.1f}s")
 
-        if job:
-            job.meta["progress"] = {"pct": 85, "msg": "Uploading result"}
-            job.save_meta()
-
+        # ---- Upload result to Drive (keep behavior) ----
+        _mark(85, "Uploading result to Drive")
         out_path = os.path.join(td, f"{user_id}_gstr2b_pr_reconciliation.xlsx")
         with open(out_path, "wb") as f:
             f.write(blob)
-
         result_id = upload_to_drive(out_path, os.path.basename(out_path))
-
-    if job:
-        job.meta["progress"] = {"pct": 100, "msg": "Done"}
-        job.save_meta()
+        _mark(100, f"Done in {time.time()-t0:.1f}s")
 
     return {"result_drive_id": result_id}
 
 # -------------------- QUEUED confirm route + status + download --------------------
-
 @app.route("/reconcile_confirm", methods=["POST"])
 def reconcile_confirm():
     # Ensure temp paths from prior /verify
@@ -992,12 +1335,21 @@ def reconcile_confirm():
 
     # Read user selections
     sel = {
-        "inv_2b": (request.form.get("inv_2b") or "").strip(),
-        "gst_2b": (request.form.get("gst_2b") or "").strip(),
-        "date_2b": (request.form.get("date_2b") or "").strip(),
-        "cgst_2b": (request.form.get("cgst_2b") or "").strip(),
-        "sgst_2b": (request.form.get("sgst_2b") or "").strip(),
-        "igst_2b": (request.form.get("igst_2b") or "").strip(),
+        # B2B (invoice-based)
+        "inv_2b_b2b": (request.form.get("inv_2b_b2b") or "").strip(),
+        "gst_2b_b2b": (request.form.get("gst_2b_b2b") or "").strip(),
+        "date_2b_b2b": (request.form.get("date_2b_b2b") or "").strip(),
+        "cgst_2b_b2b": (request.form.get("cgst_2b_b2b") or "").strip(),
+        "sgst_2b_b2b": (request.form.get("sgst_2b_b2b") or "").strip(),
+        "igst_2b_b2b": (request.form.get("igst_2b_b2b") or "").strip(),
+        # CDNR (note-based)
+        "note_2b_cdnr": (request.form.get("note_2b_cdnr") or "").strip(),
+        "gst_2b_cdnr": (request.form.get("gst_2b_cdnr") or "").strip(),
+        "notedate_2b_cdnr": (request.form.get("notedate_2b_cdnr") or "").strip(),
+        "cgst_2b_cdnr": (request.form.get("cgst_2b_cdnr") or "").strip(),
+        "sgst_2b_cdnr": (request.form.get("sgst_2b_cdnr") or "").strip(),
+        "igst_2b_cdnr": (request.form.get("igst_2b_cdnr") or "").strip(),
+        # PR
         "inv_pr": (request.form.get("inv_pr") or "").strip(),
         "gst_pr": (request.form.get("gst_pr") or "").strip(),
         "date_pr": (request.form.get("date_pr") or "").strip(),
@@ -1019,13 +1371,11 @@ def reconcile_confirm():
         session.pop("tmp2b", None); session.pop("tmppr", None)
 
     user_id = request.form.get("user_id", "anon")
-
     job = q.enqueue(
         "main.process_reconcile",  # module.function path
         drive_id_2b, drive_id_pr, sel, user_id,
         job_timeout=900, result_ttl=86400, failure_ttl=86400
     )
-
     # Return a tiny progress page that polls /status and triggers /download when ready
     return render_template("progress.html", job_id=job.id)
 
@@ -1041,26 +1391,118 @@ def status(job_id):
         payload["error"] = (job.exc_info or "")[-1000:]
     return jsonify(payload)
 
+from flask import after_this_request
+
 @app.route("/download/<job_id>", methods=["GET"])
 def download(job_id):
     job = Job.fetch(job_id, connection=rconn)
     if job.get_status() != "finished":
         return jsonify({"error": "Job not finished"}), 409
+
     drive_id = job.result.get("result_drive_id")
     if not drive_id:
         return jsonify({"error": "No result id"}), 404
 
-    # Stream the Drive file to the client (no public sharing required)
-    with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "gstr2b_pr_reconciliation.xlsx")
+    # Create a real temp file (not a tempdir) to avoid Windows cleanup races
+    fd, path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(fd)  # close descriptor; we'll write to the path
+    try:
         download_from_drive(drive_id, path)
-        return send_file(
-            path,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            as_attachment=True,
-            download_name="gstr2b_pr_reconciliation.xlsx"
-        )
+    except Exception:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        raise
+
+    @after_this_request
+    def _cleanup(response):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return response
+
+    return send_file(
+        path,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name="gstr2b_pr_reconciliation.xlsx",
+        conditional=True  # lets Flask stream without holding extra locks
+    )
+
+
+# -------------------- Auth Routes (Login / Register / Subscribe) --------------------
+from werkzeug.security import check_password_hash, generate_password_hash
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        user = User.query.filter_by(email=email).first()
+        if user and check_password_hash(user.password_hash, password):
+            session['logged_in'] = True
+            session['email'] = email
+            flash('Logged in successfully.')
+            return redirect(url_for('index'))
+        else:
+            flash('Invalid email or password.')
+    return render_template('login.html')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        if User.query.filter_by(email=email).first():
+            flash('Email already registered.')
+        else:
+            new_user = User(
+                email=email,
+                password_hash=generate_password_hash(password)
+            )
+            db.session.add(new_user)
+            db.session.commit()
+            flash('Registration successful. Please log in.')
+            return redirect(url_for('login'))
+    return render_template('register.html')
+
+@app.route('/forgot_password', methods=['GET', 'POST'])
+def forgot_password():
+    if request.method == 'POST':
+        email = request.form['email']
+        user = User.query.filter_by(email=email).first()
+        if user:
+            # In production: send real reset email
+            flash('Password reset link would be sent (simulated).')
+        else:
+            flash('Email not found.')
+    return render_template('forgot_password.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    flash('Logged out.')
+    return redirect(url_for('index'))
+
+@app.route('/subscribe', methods=['GET', 'POST'])
+def subscribe():
+    if not session.get('logged_in'):
+        flash('Please log in to access subscription.')
+        return redirect(url_for('login'))
+    if request.method == 'POST':
+        plan = request.form.get('plan')
+        if plan in ['half-yearly', 'annual']:
+            user = User.query.filter_by(email=session['email']).first()
+            if user:
+                user.subscribed = True
+                db.session.commit()
+            flash(f'Subscription activated: {plan.replace("-", " ").title()} plan.')
+            return redirect(url_for('index'))
+        else:
+            flash('Invalid plan selected.')
+    return render_template('subscribe.html')
 
 if __name__ == "__main__":
     app.run(debug=True)
-

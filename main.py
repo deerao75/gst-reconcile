@@ -1,3 +1,4 @@
+# main.py
 import io
 import re
 import os
@@ -109,19 +110,28 @@ INVOICE_CANDIDATES_2B = [
     "invoice", "invoice details inv no", "invoice details document number",
     "note no", "debit note no", "credit note no", "note number"
 ]
+# Generic GSTIN (B2B)
 GSTIN_CANDIDATES_2B = [
     "gstin of supplier", "supplier information gstin of supplier",
+    "gstin", "gst no", "gst number", "gstn"
+]
+# Stronger GSTIN for CDNR (explicit 2B wording first)
+GSTIN_CANDIDATES_CDNR = [
+    "gstin of supplier 2b", "gstin of supplier", "supplier information gstin of supplier",
     "gstin", "gst no", "gst number", "gstn"
 ]
 DATE_CANDIDATES_2B = [
     "invoice details invoice date", "invoice date", "doc date", "document date", "date"
 ]
-# NEW: explicit note number/date candidates for CDNR
+# NEW: explicit note number/date/type candidates for CDNR
 NOTE_NO_CANDIDATES_2B = [
     "note no", "note number", "credit note no", "debit note no", "cn no", "dn no", "document number", "document no"
 ]
 NOTE_DATE_CANDIDATES_2B = [
     "note date", "document date", "doc date", "credit note date", "debit note date"
+]
+NOTE_TYPE_CANDIDATES_2B = [
+    "note type", "credit/debit note", "cr/dr", "type of note", "cd note type", "cr/dr note"
 ]
 
 CGST_CANDIDATES_2B = ["cgst", "central tax", "central tax amount", "cgst amount"]
@@ -177,7 +187,6 @@ def _norm(s: str) -> str:
     return re.sub(r'[^a-z0-9]', '', str(s).strip().lower())
 
 def _softnorm(s: str) -> str:
-    """Looser normalizer for header matching: replace NBSP, collapse spaces, strip, lowercase."""
     if s is None:
         return ""
     s = str(s).replace("\xa0", " ")
@@ -185,11 +194,6 @@ def _softnorm(s: str) -> str:
     return s.lower()
 
 def normalize_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
-    """
-    Normalize all column names (trim, collapse spaces, replace NBSP, lowercase for matching),
-    but keep and return a map from normalized -> original so we can use the exact original
-    names later (for writing back to Excel).
-    """
     original_cols = list(df.columns)
     norm_to_original: Dict[str, str] = {}
     cleaned = []
@@ -268,7 +272,7 @@ def _looks_like_invoice_series(s: pd.Series) -> float:
     if vals.empty: return 0.0
     def is_inv(x: str) -> bool:
         if GSTIN_REGEX.fullmatch(x): return False
-        if len(x) < 4 or len(x) > 25: return False
+        if len(x) < 1 or len(x) > 30: return False
         if re.fullmatch(r"[A-Za-z]+", x): return False
         if re.fullmatch(r"0+", x): return False
         if re.fullmatch(r"[-/\.]+", x): return False
@@ -319,9 +323,17 @@ def as_text(x) -> str:
 def clean_gstin(value) -> str:
     return re.sub(r'\s+', '', as_text(value).upper())
 
+# --- Improved invoice normalizer (handles FY suffix/prefix like "699/25-26", "FY25-26/699") ---
+_FY_TAIL = re.compile(r"([/\-]20?\d{2}[ \-\/]?20?\d{2}|[/\-]\d{2}[/\-]\d{2}|[/\-]\d{2}[\-]\d{2})$", re.I)
+_FY_HEAD = re.compile(r"^(?:FY|FY-)?20?\d{2}[ \-\/]?20?\d{2}[/\-]", re.I)
+
 def inv_basic(s) -> str:
     v = as_text(s).upper()
     v = re.sub(r'\s+', '', v)
+    # remove common FY prefix like "FY25-26/" or "2025-26/"
+    v = _FY_HEAD.sub('', v)
+    # remove trailing FY chunk like "/25-26" or "/2025-26"
+    v = _FY_TAIL.sub('', v)
     if re.search(r'\d', v):
         v = re.sub(r'^0+(?=[A-Z0-9])', '', v)
     return v
@@ -461,17 +473,17 @@ def reconcile(
             if (d_pr or d_2b) and (d_pr != d_2b):
                 mismatches.append("Invoice Date")
 
-        def eq_amt_round(a, b):
-            return round_rupee(a) == round_rupee(b)
+        def eq_amt_round_abs(a, b):
+            return abs(round_rupee(a)) == abs(round_rupee(b))
 
         if cgst_col_pr and cgst_col_2b:
-            if not eq_amt_round(row.get(cgst_col_pr, 0), row2b.get(cgst_col_2b, 0)):
+            if not eq_amt_round_abs(row.get(cgst_col_pr, 0), row2b.get(cgst_col_2b, 0)):
                 mismatches.append("CGST")
         if sgst_col_pr and sgst_col_2b:
-            if not eq_amt_round(row.get(sgst_col_pr, 0), row2b.get(sgst_col_2b, 0)):
+            if not eq_amt_round_abs(row.get(sgst_col_pr, 0), row2b.get(sgst_col_2b, 0)):
                 mismatches.append("SGST")
         if igst_col_pr and igst_col_2b:
-            if not eq_amt_round(row.get(igst_col_pr, 0), row2b.get(igst_col_2b, 0)):
+            if not eq_amt_round_abs(row.get(igst_col_pr, 0), row2b.get(igst_col_2b, 0)):
                 mismatches.append("IGST")
 
         if mismatches:
@@ -501,7 +513,6 @@ def build_pairwise_recon(
     inv_pr: str, gst_pr: str, date_pr: str, cgst_pr: str, sgst_pr: str, igst_pr: str,
     inv_2b: str, gst_2b: str, date_2b: str, cgst_2b: str, sgst_2b: str, igst_2b: str,
 ):
-    # Explicit suffixing
     pr = df_pr.copy()
     b2 = df_2b.copy()
 
@@ -514,7 +525,6 @@ def build_pairwise_recon(
 
     merged = pd.merge(pr, b2, on=["_GST_KEY", "_INV_KEY"], how="outer")
 
-    # -------- GROUP FILL: ensure PR/2B values appear on all rows for the same key --------
     key_grp = merged.groupby(["_GST_KEY", "_INV_KEY"], dropna=False)
     pr_cols_all = [c for c in merged.columns if c.endswith("_PR")]
     b2_cols_all = [c for c in merged.columns if c.endswith("_2B")]
@@ -522,9 +532,7 @@ def build_pairwise_recon(
         merged[col] = key_grp[col].transform(lambda s: s.ffill().bfill())
     for col in b2_cols_all:
         merged[col] = key_grp[col].transform(lambda s: s.ffill().bfill())
-    # -------------------------------------------------------------------------------------
 
-    # Column names used later
     inv_pr_col = f"{inv_pr}_PR" if inv_pr else None
     gst_pr_col = f"{gst_pr}_PR" if gst_pr else None
     inv_2b_col = f"{inv_2b}_2B" if inv_2b else None
@@ -538,7 +546,7 @@ def build_pairwise_recon(
     igst_pr_col = f"{igst_pr}_PR" if igst_pr else None
     igst_2b_col = f"{igst_2b}_2B" if igst_2b else None
 
-    # Mapping/remarks/reason (Almost Match when any field differs)
+    # Mapping/remarks/reason (Almost Match when any field differs) — compare **without sign**
     mapping, remarks, reason = [], [], []
     for _, r in merged.iterrows():
         pr_inv_val = as_text(r.get(inv_pr_col, "")) if inv_pr_col in merged.columns else ""
@@ -560,14 +568,14 @@ def build_pairwise_recon(
             if (d_pr or d_2b) and (d_pr != d_2b):
                 mismatches.append("Invoice Date")
 
-        def neq_round(a, b):
-            return round_rupee(a) != round_rupee(b)
+        def neq_round_abs(a, b):
+            return abs(round_rupee(a)) != abs(round_rupee(b))
 
-        if cgst_pr_col and cgst_2b_col and neq_round(r.get(cgst_pr_col, 0), r.get(cgst_2b_col, 0)):
+        if cgst_pr_col and cgst_2b_col and neq_round_abs(r.get(cgst_pr_col, 0), r.get(cgst_2b_col, 0)):
             mismatches.append("CGST")
-        if sgst_pr_col and sgst_2b_col and neq_round(r.get(sgst_pr_col, 0), r.get(sgst_2b_col, 0)):
+        if sgst_pr_col and sgst_2b_col and neq_round_abs(r.get(sgst_pr_col, 0), r.get(sgst_2b_col, 0)):
             mismatches.append("SGST")
-        if igst_pr_col and igst_2b_col and neq_round(r.get(igst_pr_col, 0), r.get(igst_2b_col, 0)):
+        if igst_pr_col and igst_2b_col and neq_round_abs(r.get(igst_pr_col, 0), r.get(igst_2b_col, 0)):
             mismatches.append("IGST")
 
         if mismatches:
@@ -580,13 +588,11 @@ def build_pairwise_recon(
     out["Remarks"] = remarks
     out["Reason"] = reason
 
-    # Fix PR invoice display if blank/zero
     if inv_pr_col in out.columns:
         out[inv_pr_col] = out[inv_pr_col].map(as_text)
         mask_fix = (out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())
         out.loc[mask_fix, inv_pr_col] = out.loc[mask_fix, "_INV_KEY"]
 
-    # Detect Vendor Name (PR) and GSTR-1 Filing Status (2B)
     def pick_from_list(columns, candidates):
         cnorm = [_norm(c) for c in candidates]
         best = None; best_score = -1
@@ -603,7 +609,6 @@ def build_pairwise_recon(
     vendor_name_pr = pick_from_list(pr_cols_all, [f"{x}_PR" for x in VENDOR_NAME_PR_CANDIDATES])
     gstr1_status_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in GSTR1_STATUS_2B_CANDIDATES])
 
-    # Order columns
     pair_cols = [
         gst_pr_col, gst_2b_col,
         inv_pr_col, inv_2b_col,
@@ -618,7 +623,6 @@ def build_pairwise_recon(
     final_cols = front + pair_cols + keep_extra
     out = out[final_cols]
 
-    # ---------------- "2B month" using GSTR-1 filing status text ----------------
     two_b_month_series = ""
     if gstr1_status_2b and gstr1_status_2b in out.columns:
         two_b_month_series = out[gstr1_status_2b]
@@ -631,17 +635,6 @@ def build_pairwise_recon(
 
 # -------------------- Dashboard --------------------
 def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
-    """
-    Dashboard shape:
-
-    Status |     Matched        |   Almost Matched    |    Not Matched     |       Total
-    Report |  PR   | GSTR 2B     |   PR   | GSTR 2B     |   PR   | GSTR 2B     |   PR   | GSTR 2B
-    CGST
-    SGST
-    IGST
-    Total
-    """
-    # Column names coming from pair_cols
     cgst_pr = cols.get("cgst_pr_col")
     sgst_pr = cols.get("sgst_pr_col")
     igst_pr = cols.get("igst_pr_col")
@@ -658,7 +651,6 @@ def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> p
         return float(s.sum())
 
     def block(status: Optional[str]) -> dict:
-        # status=None means "Total" across all rows
         return {
             ("Matched" if status == "Matched" else
              "Almost Matched" if status == "Almost Matched" else
@@ -680,22 +672,19 @@ def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> p
             ],
         }
 
-    # Assemble the full table
     rows = ["CGST", "SGST", "IGST", "Total"]
     data_cols = {}
-    for st in ["Matched", "Almost Matched", "Not Matched", None]:  # None => Total block
+    for st in ["Matched", "Almost Matched", "Not Matched", None]:
         data_cols.update(block(st))
 
-    # Left-most "Status/Report" label column
     left = {("Status", "Report"): rows}
 
-    # Build MultiIndex DataFrame
     cols_mi = pd.MultiIndex.from_tuples(
         list(left.keys()) + list(data_cols.keys()),
         names=["", ""]
     )
     df = pd.DataFrame(
-        list(zip(*([*left.values(), *data_cols.values()])))  # rows of tuples → list of rows
+        list(zip(*([*left.values(), *data_cols.values()])))
     )
     df.columns = cols_mi
     return df
@@ -721,12 +710,7 @@ def verify_columns():
     session["tmp2b"] = tmp2b.name
     session["tmppr"] = tmppr.name
 
-    # Read B2B (required) and B2B-CDNR (optional) using headers in rows 5/6
     wanted_sheets = ["B2B", "B2B-CDNR"]
-    frames = []
-    # xls = pd.ExcelFile(tmp2b.name)
-    # present_sheets = [sn for sn in wanted_sheets if sn in xls.sheet_names]
-
     with pd.ExcelFile(tmp2b.name) as xls:
         sheet_names = xls.sheet_names
     present_sheets = [sn for sn in wanted_sheets if sn in sheet_names]
@@ -735,25 +719,24 @@ def verify_columns():
         flash("Could not find a 'B2B' sheet in the GSTR-2B file.")
         return redirect(url_for("index"))
 
-    # Load each present sheet separately for detection defaults (no concat yet)
     df_b2b = None
     df_cdnr = None
     if "B2B" in present_sheets:
         df_b2b = pd.read_excel(tmp2b.name, sheet_name="B2B", header=[4, 5], engine="openpyxl", dtype=str)
-        print("LOCAL B2B COLS:", df_b2b.columns.tolist()[:25])   # 👈 insert here
+        print("LOCAL B2B COLS:", df_b2b.columns.tolist()[:25])
         df_b2b = df_b2b.dropna(how="all")
         df_b2b.columns = flatten_columns(df_b2b.columns)
         df_b2b, _ = normalize_columns(df_b2b)
 
     if "B2B-CDNR" in present_sheets:
         df_cdnr = pd.read_excel(tmp2b.name, sheet_name="B2B-CDNR", header=[4, 5], engine="openpyxl", dtype=str)
-        print("LOCAL CDNR COLS:", df_cdnr.columns.tolist()[:25])  # 👈 insert here
+        print("LOCAL CDNR COLS:", df_cdnr.columns.tolist()[:25])
         df_cdnr = df_cdnr.dropna(how="all")
         df_cdnr.columns = flatten_columns(df_cdnr.columns)
         df_cdnr, _ = normalize_columns(df_cdnr)
 
     df_pr_raw = pd.read_excel(tmppr.name, engine="openpyxl", dtype=str)
-    print("LOCAL PR COLS:", df_pr_raw.columns.tolist()[:25])      # 👈 insert here
+    print("LOCAL PR COLS:", df_pr_raw.columns.tolist()[:25])
     df_pr_raw, _ = normalize_columns(df_pr_raw)
 
     # ---- Detection for B2B (invoice-based) ----
@@ -767,7 +750,8 @@ def verify_columns():
     # ---- Detection for CDNR (note-based) ----
     note_2b_cdnr = _pick_column(df_cdnr, NOTE_NO_CANDIDATES_2B) if df_cdnr is not None else None
     notedate_2b_cdnr = _pick_column(df_cdnr, NOTE_DATE_CANDIDATES_2B) if df_cdnr is not None else None
-    gst_2b_cdnr = _pick_column(df_cdnr, GSTIN_CANDIDATES_2B) if df_cdnr is not None else None
+    note_type_2b_cdnr = _pick_column(df_cdnr, NOTE_TYPE_CANDIDATES_2B) if df_cdnr is not None else None
+    gst_2b_cdnr = _pick_column(df_cdnr, GSTIN_CANDIDATES_CDNR) if df_cdnr is not None else None
     cgst_2b_cdnr = _pick_column(df_cdnr, CGST_CANDIDATES_2B) if df_cdnr is not None else None
     sgst_2b_cdnr = _pick_column(df_cdnr, SGST_CANDIDATES_2B) if df_cdnr is not None else None
     igst_2b_cdnr = _pick_column(df_cdnr, IGST_CANDIDATES_2B) if df_cdnr is not None else None
@@ -805,14 +789,12 @@ def verify_columns():
         cols_2b_cdnr=cols_cdnr,
         note_2b_cdnr=note_2b_cdnr, notedate_2b_cdnr=notedate_2b_cdnr, gst_2b_cdnr=gst_2b_cdnr,
         cgst_2b_cdnr=cgst_2b_cdnr, sgst_2b_cdnr=sgst_2b_cdnr, igst_2b_cdnr=igst_2b_cdnr,
+        note_type_2b_cdnr=note_type_2b_cdnr,
         has_cdnr=("B2B-CDNR" in present_sheets)
     )
 
-# ------- Extracted heavy logic into a helper so the worker can call it -------
-
-# ---------- helpers (keep these near the other helpers) ----------
+# ---------- helpers ----------
 def _pick_best_note_col(df: pd.DataFrame, primary: Optional[str]) -> Optional[str]:
-    """For CDNR: if the chosen note column is missing or >70% blank, pick a better one."""
     if df is None or df.empty:
         return primary
     def non_empty_ratio(col):
@@ -831,35 +813,23 @@ def _pick_best_note_col(df: pd.DataFrame, primary: Optional[str]) -> Optional[st
     return primary
 
 def _rescue_empty_inv_keys(df: pd.DataFrame, inv_col: str) -> pd.DataFrame:
-    """
-    After consolidate_by_key, ensure _INV_KEY is not empty/NaN for CDNR rows.
-    - If empty/NaN, rebuild _INV_KEY from inv_col via inv_basic()
-    - If still empty, assign a row-unique placeholder to prevent GSTIN-level collapse.
-    """
     if df.empty:
         return df
     df = df.copy()
-
     def _is_empty_key(s: pd.Series) -> pd.Series:
         return s.isna() | (s.astype(str).str.strip() == "")
-
     mask_empty = _is_empty_key(df["_INV_KEY"])
-
     if mask_empty.any() and inv_col in df.columns:
         df.loc[mask_empty, "_INV_KEY"] = df.loc[mask_empty, inv_col].map(inv_basic)
-
     mask_still = _is_empty_key(df["_INV_KEY"])
     if mask_still.any():
         df.loc[mask_still, "_INV_KEY"] = df.index[mask_still].map(lambda i: f"__CDNR_ROW__{i}__")
-
     return df
 
 def _append_if_missing(target_list: List[str], candidates: List[Optional[str]]) -> None:
-    """Avoids any 'must not in …' parsing weirdness and keeps linters happy."""
     for c in candidates:
         if c and (c not in target_list):
             target_list.append(c)
-
 
 def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                                  # B2B (invoice-based)
@@ -869,10 +839,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                                  # PR
                                  inv_pr_sel: str, gst_pr_sel: str, date_pr_sel: str, cgst_pr_sel: str, sgst_pr_sel: str, igst_pr_sel: str) -> bytes:
 
-    # Read sheets with header rows 5/6 (index 4,5)
-    # xls = pd.ExcelFile(tmp2b_path)
-    # has_b2b = "B2B" in xls.sheet_names
-    # has_cdnr = "B2B-CDNR" in xls.sheet_names
     with pd.ExcelFile(tmp2b_path) as xls:
         sheet_names = set(xls.sheet_names)
     has_b2b = "B2B" in sheet_names
@@ -894,35 +860,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     df_cdnr_raw = load_sheet("B2B-CDNR") if has_cdnr else pd.DataFrame()
 
     df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
-    df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)  # normalize PR headers, keep map
+    df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)
 
-    # ---------------- Apply sign logic for B2B & CDNR ----------------
-    def apply_signs(df):
-        if df.empty:
-            return df
-        df = df.copy()
-        def get_note_type(row):
-            inv = as_text(row.get(INVOICE_CANDIDATES_2B[0], "") if INVOICE_CANDIDATES_2B else "")
-            if "credit" in inv.lower() or "cr" in inv.lower():
-                return "credit"
-            if "debit" in inv.lower() or "dr" in inv.lower():
-                return "debit"
-            if row.get("_SOURCE_SHEET") == "B2B-CDNR":
-                return "credit"
-            return "invoice"
-        df["_NOTE_TYPE"] = df.apply(get_note_type, axis=1)
-        numeric_cols = [c for c in (
-            CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B +
-            TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B + INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
-        ) if c in df.columns]
-        for col in numeric_cols:
-            df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
-        return df
-
-    df_b2b_raw = apply_signs(df_b2b_raw)
-    df_cdnr_raw = apply_signs(df_cdnr_raw)
-
-    # ---- normalized selection must match ANY header (robust) ----
+    # ---- normalized selection helpers ----
     def match_provided(df: pd.DataFrame, provided: str) -> Optional[str]:
         if not provided:
             return None
@@ -949,7 +889,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                 return guess
         return None
 
-    # ---------- CDNR strong substring picks (helps PyCharm infer flow too) ----------
     def _pick_col_contains(df, pattern):
         if df is None:
             return None
@@ -972,58 +911,88 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     # --- Resolve columns for CDNR (note-based) ---
     note_2b_cdnr     = ensure_col(df_cdnr_raw, note_2b_cdnr_sel, NOTE_NO_CANDIDATES_2B)
     notedate_2b_cdnr = ensure_col(df_cdnr_raw, notedate_2b_cdnr_sel, NOTE_DATE_CANDIDATES_2B)
+    note_type_2b     = ensure_col(df_cdnr_raw, "", NOTE_TYPE_CANDIDATES_2B)  # auto-pick
     if cdnr_note_hard:
         note_2b_cdnr = cdnr_note_hard
     if cdnr_ndate_hard:
         notedate_2b_cdnr = cdnr_ndate_hard
     note_2b_cdnr = _pick_best_note_col(df_cdnr_raw, note_2b_cdnr)
 
-    gst_2b_cdnr = ensure_col(df_cdnr_raw, gst_2b_cdnr_sel, GSTIN_CANDIDATES_2B)
+    gst_2b_cdnr = ensure_col(df_cdnr_raw, gst_2b_cdnr_sel, GSTIN_CANDIDATES_CDNR)
     cgst_2b_cdnr = ensure_col(df_cdnr_raw, cgst_2b_cdnr_sel, CGST_CANDIDATES_2B)
     sgst_2b_cdnr = ensure_col(df_cdnr_raw, sgst_2b_cdnr_sel, SGST_CANDIDATES_2B)
     igst_2b_cdnr = ensure_col(df_cdnr_raw, igst_2b_cdnr_sel, IGST_CANDIDATES_2B)
 
-    # --- Resolve columns for PR ---
-    gst_pr = ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
-                        penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
-                        value_picker=lambda d: pick_gstin_by_values(d, prefer_supplier=True))
-    inv_pr = ensure_col(df_pr_raw, inv_pr_sel, INVOICE_CANDIDATES_PR,
-                        avoid=AVOID_DOC_LIKE_FOR_PR,
-                        penalties=["company", "recipient", "gstin"],
-                        value_picker=pick_invoice_by_values)
-    date_pr = ensure_col(df_pr_raw, date_pr_sel, DATE_CANDIDATES_PR)
-    cgst_pr = ensure_col(df_pr_raw, cgst_pr_sel, CGST_CANDIDATES_PR)
-    sgst_pr = ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
-    igst_pr = ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
-
-    # ==== DEBUG: column resolution sanity (TEMP – remove after testing) ====
-    print("RESOLVED COLUMNS ->",
-          "\n  B2B:", inv_2b_b2b, gst_2b_b2b, date_2b_b2b, cgst_2b_b2b, sgst_2b_b2b, igst_2b_b2b,
-          "\n  CDNR:", note_2b_cdnr, gst_2b_cdnr, notedate_2b_cdnr, cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr,
-          "\n  PR:", inv_pr, gst_pr, date_pr, cgst_pr, sgst_pr, igst_pr)
-
+    # ==== DEBUG: column resolution ====
     def _exists(df, name):
         return bool(name) and (name in df.columns)
+    def _nn(df, c):
+        if not c or c not in df.columns: return -1
+        return int(pd.Series(df[c]).astype(str).str.strip().ne("").sum())
 
+    print("RESOLVED COLUMNS -> ",
+          "\n  B2B:", inv_2b_b2b, gst_2b_b2b, date_2b_b2b, cgst_2b_b2b, sgst_2b_b2b, igst_2b_b2b,
+          "\n  CDNR:", note_2b_cdnr, gst_2b_cdnr, notedate_2b_cdnr, cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr, "| NOTE TYPE:", note_type_2b,
+          "\n  PR:", match_provided(df_pr_raw, inv_pr_sel) or inv_pr_sel, match_provided(df_pr_raw, gst_pr_sel) or gst_pr_sel, date_pr_sel, cgst_pr_sel, sgst_pr_sel, igst_pr_sel)
     print("EXISTENCE CHECK ->",
           "\n  B2B:", _exists(df_b2b_raw, inv_2b_b2b), _exists(df_b2b_raw, gst_2b_b2b), _exists(df_b2b_raw, date_2b_b2b),
           _exists(df_b2b_raw, cgst_2b_b2b), _exists(df_b2b_raw, sgst_2b_b2b), _exists(df_b2b_raw, igst_2b_b2b),
           "\n  CDNR:", _exists(df_cdnr_raw, note_2b_cdnr), _exists(df_cdnr_raw, gst_2b_cdnr), _exists(df_cdnr_raw, notedate_2b_cdnr),
           _exists(df_cdnr_raw, cgst_2b_cdnr), _exists(df_cdnr_raw, sgst_2b_cdnr), _exists(df_cdnr_raw, igst_2b_cdnr),
-          "\n  PR:", _exists(df_pr_raw, inv_pr), _exists(df_pr_raw, gst_pr), _exists(df_pr_raw, date_pr),
-          _exists(df_pr_raw, cgst_pr), _exists(df_pr_raw, sgst_pr), _exists(df_pr_raw, igst_pr))
-
-    def _nn(df, c):
-        if not c or c not in df.columns:
-            return -1
-        return int(pd.Series(df[c]).astype(str).str.strip().ne("").sum())
-
+          "\n  PR:", _exists(df_pr_raw, inv_pr_sel), _exists(df_pr_raw, gst_pr_sel), _exists(df_pr_raw, date_pr_sel),
+          _exists(df_pr_raw, cgst_pr_sel), _exists(df_pr_raw, sgst_pr_sel), _exists(df_pr_raw, igst_pr_sel))
     print("NON-NULL COUNTS ->",
-          "\n  PR:", inv_pr, _nn(df_pr_raw, inv_pr), "|", gst_pr, _nn(df_pr_raw, gst_pr),
-          "\n  B2B:", inv_2b_b2b, _nn(df_b2b_raw, inv_2b_b2b), "|", gst_2b_b2b, _nn(df_b2b_raw, gst_2b_b2b),
-          "\n  CDNR:", note_2b_cdnr, _nn(df_cdnr_raw, note_2b_cdnr), "|", gst_2b_cdnr, _nn(df_cdnr_raw, gst_2b_cdnr))
-    # ==== /DEBUG ====
+          "\n  PR:", "Inv", _nn(df_pr_raw, inv_pr_sel), "| GSTIN", _nn(df_pr_raw, gst_pr_sel),
+          "\n  B2B:", "Inv", _nn(df_b2b_raw, inv_2b_b2b), "| GSTIN", _nn(df_b2b_raw, gst_2b_b2b),
+          "\n  CDNR:", "Note", _nn(df_cdnr_raw, note_2b_cdnr), "| GSTIN", _nn(df_cdnr_raw, gst_2b_cdnr))
 
+    # ---------------- Apply sign logic ----------------
+    def apply_signs(df, note_type_col: Optional[str]) -> pd.DataFrame:
+        if df.empty:
+            return df
+        df = df.copy()
+
+        def normalize_note_type(val: str) -> str:
+            s = as_text(val).lower()
+            if re.search(r'\bdebit\b|\bdn\b|\bdr\b', s):  return "debit"
+            if re.search(r'\bcredit\b|\bcn\b|\bcr\b', s): return "credit"
+            return ""
+
+        if note_type_col and note_type_col in df.columns:
+            df["_NOTE_TYPE"] = df[note_type_col].map(normalize_note_type)
+        else:
+            # fallback: infer from obvious tokens in note number; if CDNR and unknown -> credit
+            def infer(row):
+                note = as_text(row.get(_pick_best_note_col(df, None) or "", ""))
+                s = note.lower()
+                if "dn" in s or "debit" in s or re.search(r'\bdr\b', s): return "debit"
+                if "cn" in s or "credit" in s or re.search(r'\bcr\b', s): return "credit"
+                return "credit" if row.get("_SOURCE_SHEET") == "B2B-CDNR" else "invoice"
+            df["_NOTE_TYPE"] = df.apply(infer, axis=1)
+
+        numeric_cols = [c for c in (
+            CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B +
+            TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B + INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
+        ) if c in df.columns]
+        for col in numeric_cols:
+            df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
+        return df
+
+    df_b2b_raw = apply_signs(df_b2b_raw, note_type_col=None)
+    df_cdnr_raw = apply_signs(df_cdnr_raw, note_type_col=note_type_2b)
+
+    # ---------- Column resolution for PR after normalization ----------
+    gst_pr = match_provided(df_pr_raw, gst_pr_sel) or ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
+                        penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
+                        value_picker=lambda d: pick_gstin_by_values(d, prefer_supplier=True))
+    inv_pr = match_provided(df_pr_raw, inv_pr_sel) or ensure_col(df_pr_raw, inv_pr_sel, INVOICE_CANDIDATES_PR,
+                        avoid=AVOID_DOC_LIKE_FOR_PR,
+                        penalties=["company", "recipient", "gstin"],
+                        value_picker=pick_invoice_by_values)
+    date_pr = match_provided(df_pr_raw, date_pr_sel) or ensure_col(df_pr_raw, date_pr_sel, DATE_CANDIDATES_PR)
+    cgst_pr = match_provided(df_pr_raw, cgst_pr_sel) or ensure_col(df_pr_raw, cgst_pr_sel, CGST_CANDIDATES_PR)
+    sgst_pr = match_provided(df_pr_raw, sgst_pr_sel) or ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
+    igst_pr = match_provided(df_pr_raw, igst_pr_sel) or ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
 
     # ---------------- Optional numeric columns ----------------
     def optional_numeric_list(df_):
@@ -1038,10 +1007,14 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         return res
 
     opt_2b_b2b = optional_numeric_list(df_b2b_raw)
-    _append_if_missing(opt_2b_b2b, [cgst_2b_b2b, sgst_2b_b2b, igst_2b_b2b])
+    _append_if_missing(opt_2b_b2b, [ensure_col(df_b2b_raw, "", CGST_CANDIDATES_2B),
+                                    ensure_col(df_b2b_raw, "", SGST_CANDIDATES_2B),
+                                    ensure_col(df_b2b_raw, "", IGST_CANDIDATES_2B)])
 
     opt_2b_cdnr = optional_numeric_list(df_cdnr_raw)
-    _append_if_missing(opt_2b_cdnr, [cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr])
+    _append_if_missing(opt_2b_cdnr, [ensure_col(df_cdnr_raw, "", CGST_CANDIDATES_2B),
+                                     ensure_col(df_cdnr_raw, "", SGST_CANDIDATES_2B),
+                                     ensure_col(df_cdnr_raw, "", IGST_CANDIDATES_2B)])
 
     opt_pr = optional_numeric_list(df_pr_raw)
     _append_if_missing(opt_pr, [cgst_pr, sgst_pr, igst_pr])
@@ -1057,11 +1030,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr
     ) if (df_cdnr_raw is not None and not df_cdnr_raw.empty and note_2b_cdnr and gst_2b_cdnr) else pd.DataFrame()
 
-    # Ensure CDNR has non-empty _INV_KEY (Note Number) so it never collapses at GSTIN level
     if not df_2b_cdnr.empty:
         df_2b_cdnr = _rescue_empty_inv_keys(df_2b_cdnr, inv_col=note_2b_cdnr)
-
-        # -------- debug prints you asked for --------
         print("CDNR Note column picked:", note_2b_cdnr)
         print("CDNR Note date column:", notedate_2b_cdnr)
         pct_empty = (
@@ -1076,14 +1046,13 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             print(df_2b_cdnr.head(5)[cols_to_show])
         except Exception:
             pass
-        # --------------------------------------------
 
     df_pr = consolidate_by_key(
         df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr,
         date_col=date_pr, numeric_cols=opt_pr
     )
 
-    # ---------- display columns (Invoice vs Note) ----------
+    # ---------- display columns ----------
     def add_display_cols(df_, inv_col, date_col, source_tag):
         if df_.empty:
             return df_
@@ -1095,9 +1064,20 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     df_2b_b2b = add_display_cols(df_2b_b2b, inv_2b_b2b, date_2b_b2b, "B2B")
     df_2b_cdnr = add_display_cols(df_2b_cdnr, note_2b_cdnr, notedate_2b_cdnr, "B2B-CDNR")
+
+    # Keep note type (Debit/Credit) on CDNR consolidated rows for final output
+    if "_NOTE_TYPE" in df_cdnr_raw.columns and not df_2b_cdnr.empty:
+        # Best-effort carry: if original had _NOTE_TYPE per row, we can't aggregate a list;
+        # use first encountered per key which is fine for typical CDNR rows
+        nt_map = (df_cdnr_raw.assign(_GST_KEY=df_cdnr_raw[gst_2b_cdnr].map(clean_gstin),
+                                     _INV_KEY=df_cdnr_raw[note_2b_cdnr].map(inv_basic))
+                            .dropna(subset=["_GST_KEY","_INV_KEY"]))
+        nt_map = nt_map.groupby(["_GST_KEY","_INV_KEY"])["_NOTE_TYPE"].first().to_dict()
+        df_2b_cdnr["_NOTE_TYPE"] = df_2b_cdnr.apply(lambda r: nt_map.get((r["_GST_KEY"], r["_INV_KEY"]), ""), axis=1)
+
     df_2b = pd.concat([df_2b_b2b, df_2b_cdnr], ignore_index=True) if (not df_2b_b2b.empty or not df_2b_cdnr.empty) else df_2b_b2b
 
-    # ---------- build pairwise recon (this shows Note No under "Invoice Number (2B)") ----------
+    # ---------- build pairwise recon ----------
     combined_df, pair_cols = build_pairwise_recon(
         df_pr=df_pr, df_2b=df_2b,
         inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr,
@@ -1129,7 +1109,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     dashboard_tx = dashboard_df.set_index("Status").reset_index()
 
     # ---------------- Add extra columns to Reconciliation ----------------
-    # Add Invoice Type (from B2B sheet) and Note Type (from CDNR sheet)
     invoice_type_map = df_2b_b2b.set_index(["_GST_KEY", "_INV_KEY"]).get("_SOURCE_SHEET", pd.Series()).to_dict() \
         if not df_2b_b2b.empty else {}
     note_type_map = df_2b_cdnr.set_index(["_GST_KEY", "_INV_KEY"]).get("_NOTE_TYPE", pd.Series()).to_dict() \
@@ -1137,10 +1116,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     combined_df["Invoice Type"] = combined_df.apply(
         lambda r: invoice_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), ""), axis=1)
+    # Capitalise nicely for display
     combined_df["Note Type"] = combined_df.apply(
-        lambda r: note_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), ""), axis=1)
+        lambda r: {"credit":"Credit Note","debit":"Debit Note"}.get(note_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), "").lower(), ""), axis=1)
 
-    # Re-order columns: place after _INV_KEY
     cols = list(combined_df.columns)
     if "Invoice Type" in cols and "Note Type" in cols:
         idx = cols.index("_INV_KEY") + 1
@@ -1155,7 +1134,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             header_len = len(str(col_name)) + 4
             try:
                 content_len = int(sample[col_name].astype(str).map(len).max())
-                # guard: content_len may be NaN if col not in sample
                 if isinstance(content_len, float) and math.isnan(content_len):
                     content_len = 0
             except Exception:
@@ -1167,7 +1145,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     with pd.ExcelWriter(
         output,
         engine="xlsxwriter",
-        engine_kwargs={"options": {"strings_to_urls": False}},  # ← just remove constant_memory
+        engine_kwargs={"options": {"strings_to_urls": False}},
     ) as writer:
         wb = writer.book
         header_fmt = wb.add_format({"bold": True})
@@ -1180,15 +1158,12 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         ws.set_row(0, None, header_fmt)
         _autosize_ws(ws, combined_df)
 
-        # ---------------- Dashboard (manual two-row header; MI-safe) ----------------
+        # ---------------- Dashboard (manual header; MI-safe) ----------------
         ws2 = writer.book.add_worksheet("Dashboard")
         writer.sheets["Dashboard"] = ws2
-
-        # Formats
-        hdr_bold = header_fmt  # from above
+        hdr_bold = header_fmt
         num_fmt  = wb.add_format({"num_format": "#,##0.00"})
 
-        # Helpers to sum values
         def _sum_component(status, col_name):
             if not col_name or col_name not in combined_df.columns:
                 return 0.0
@@ -1196,7 +1171,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             return float(pd.to_numeric(combined_df.loc[mask, col_name], errors="coerce").fillna(0).sum())
 
         def _block_vals(status):
-            # status=None => total across all rows
             cg_pr = _sum_component(status, pair_cols.get("cgst_pr_col"))
             sg_pr = _sum_component(status, pair_cols.get("sgst_pr_col"))
             ig_pr = _sum_component(status, pair_cols.get("igst_pr_col"))
@@ -1207,14 +1181,11 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             ig_2b = _sum_component(status, pair_cols.get("igst_2b_col"))
             tot_2b = cg_2b + sg_2b + ig_2b
 
-            # returns rows CGST, SGST, IGST, Total for PR and GSTR2B
             return ([cg_pr, sg_pr, ig_pr, tot_pr], [cg_2b, sg_2b, ig_2b, tot_2b])
 
-        statuses = ["Matched", "Almost Matched", "Not Matched", None]  # None => "Total"
-        subhdrs  = ["PR", "GSTR 2B"]
+        statuses = ["Matched", "Almost Matched", "Not Matched", None]
         rowlabels = ["CGST", "SGST", "IGST", "Total"]
 
-        # Header row 0: "Status" | each status merged over 2 cols
         ws2.write(0, 0, "Status", hdr_bold)
         col = 1
         for st in statuses:
@@ -1222,7 +1193,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             ws2.merge_range(0, col, 0, col+1, title, hdr_bold)
             col += 2
 
-        # Header row 1: "Report" | subheaders PR, GSTR 2B per status
         ws2.write(1, 0, "Report", hdr_bold)
         col = 1
         for _ in statuses:
@@ -1230,7 +1200,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             ws2.write(1, col + 1, "GSTR 2B", hdr_bold)
             col += 2
 
-        # Body: row labels + values
         for r, label in enumerate(rowlabels, start=2):
             ws2.write(r, 0, label, hdr_bold)
 
@@ -1243,14 +1212,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                 ws2.write_number(r, col+1, v, num_fmt)
             col += 2
 
-        # Freeze panes under the two header rows
         ws2.freeze_panes(2, 0)
-
-        # Autosize columns (simple)
         for c in range(0, 1 + len(statuses)*2):
             ws2.set_column(c, c, 14)
-        ws2.set_column(0, 0, 12)  # "Status" column a bit narrower
-
+        ws2.set_column(0, 0, 12)
 
         # ---------------- PR - Comments ----------------
         pr_comments.to_excel(writer, index=False, sheet_name="PR - Comments")
@@ -1269,12 +1234,6 @@ import tempfile, os, time
 from concurrent.futures import ThreadPoolExecutor
 
 def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:
-    """
-    Faster version:
-      • Parallel downloads (2B + PR)
-      • Clear progress updates
-      • Timing logs in worker output
-    """
     def _mark(pct, msg):
         j = get_current_job()
         if j:
@@ -1288,7 +1247,6 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
         in2b = os.path.join(td, "gstr2b.xlsx")
         inpr = os.path.join(td, "purchase_register.xlsx")
 
-        # ---- Download both files concurrently (overlap network I/O) ----
         _mark(5, "Downloading inputs from Drive")
         def _dl(fid, path):
             download_from_drive(fid, path)
@@ -1296,11 +1254,9 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
         with ThreadPoolExecutor(max_workers=2) as ex:
             fut2b = ex.submit(_dl, drive_id_2b, in2b)
             futpr = ex.submit(_dl, drive_id_pr, inpr)
-            fut2b.result()
-            futpr.result()
+            fut2b.result(); futpr.result()
         _mark(22, f"Downloads finished in {time.time()-t0:.1f}s")
 
-        # ---- Reconcile + build XLSX (XlsxWriter used inside pipeline) ----
         _mark(30, "Reconciling")
         x = selections
         blob = _run_reconciliation_pipeline(
@@ -1314,7 +1270,6 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
         )
         _mark(82, f"Reconcile+write took {time.time()-t0:.1f}s")
 
-        # ---- Upload result to Drive (keep behavior) ----
         _mark(85, "Uploading result to Drive")
         out_path = os.path.join(td, f"{user_id}_gstr2b_pr_reconciliation.xlsx")
         with open(out_path, "wb") as f:
@@ -1327,13 +1282,11 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
 # -------------------- QUEUED confirm route + status + download --------------------
 @app.route("/reconcile_confirm", methods=["POST"])
 def reconcile_confirm():
-    # Ensure temp paths from prior /verify
     tmp2b = session.get("tmp2b"); tmppr = session.get("tmppr")
     if not tmp2b or not tmppr or (not os.path.exists(tmp2b)) or (not os.path.exists(tmppr)):
         flash("Upload session expired. Please re-upload the files.")
         return redirect(url_for("index"))
 
-    # Read user selections
     sel = {
         # B2B (invoice-based)
         "inv_2b_b2b": (request.form.get("inv_2b_b2b") or "").strip(),
@@ -1358,12 +1311,10 @@ def reconcile_confirm():
         "igst_pr": (request.form.get("igst_pr") or "").strip(),
     }
 
-    # Upload both temp files to Google Drive and enqueue job
     try:
         drive_id_2b = upload_to_drive(tmp2b, "gstr2b.xlsx")
         drive_id_pr = upload_to_drive(tmppr, "purchase_register.xlsx")
     finally:
-        # Clean local temp & session
         try:
             os.remove(tmp2b); os.remove(tmppr)
         except Exception:
@@ -1372,11 +1323,10 @@ def reconcile_confirm():
 
     user_id = request.form.get("user_id", "anon")
     job = q.enqueue(
-        "main.process_reconcile",  # module.function path
+        "main.process_reconcile",
         drive_id_2b, drive_id_pr, sel, user_id,
         job_timeout=900, result_ttl=86400, failure_ttl=86400
     )
-    # Return a tiny progress page that polls /status and triggers /download when ready
     return render_template("progress.html", job_id=job.id)
 
 @app.route("/status/<job_id>", methods=["GET"])
@@ -1403,9 +1353,8 @@ def download(job_id):
     if not drive_id:
         return jsonify({"error": "No result id"}), 404
 
-    # Create a real temp file (not a tempdir) to avoid Windows cleanup races
     fd, path = tempfile.mkstemp(suffix=".xlsx")
-    os.close(fd)  # close descriptor; we'll write to the path
+    os.close(fd)
     try:
         download_from_drive(drive_id, path)
     except Exception:
@@ -1428,11 +1377,10 @@ def download(job_id):
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
         download_name="gstr2b_pr_reconciliation.xlsx",
-        conditional=True  # lets Flask stream without holding extra locks
+        conditional=True
     )
 
-
-# -------------------- Auth Routes (Login / Register / Subscribe) --------------------
+# -------------------- Auth Routes --------------------
 from werkzeug.security import check_password_hash, generate_password_hash
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -1474,7 +1422,6 @@ def forgot_password():
         email = request.form['email']
         user = User.query.filter_by(email=email).first()
         if user:
-            # In production: send real reset email
             flash('Password reset link would be sent (simulated).')
         else:
             flash('Email not found.')

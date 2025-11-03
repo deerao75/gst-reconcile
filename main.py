@@ -178,6 +178,8 @@ VENDOR_NAME_PR_CANDIDATES = [
     "vendor name", "supplier name", "party name", "name of supplier", "vendor", "supplier"
 ]
 GSTR1_STATUS_2B_CANDIDATES = [
+    "gstr-1/iff/gstr-5 period",  # exact header present in 2B B2B & B2B-CDNR
+    "gstr1/iff/gstr5 period",    # normalized variant (safety)
     "gstr-1 filing status", "gstr1 filing status", "filing status", "filing status details",
     "gstr1 status", "gstr-1 status", "status", "tax period", "return period"
 ]
@@ -590,7 +592,8 @@ def build_pairwise_recon(
 
     if inv_pr_col in out.columns:
         out[inv_pr_col] = out[inv_pr_col].map(as_text)
-        mask_fix = (out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())
+        # don't back-fill PR invoice when the row is "missing in PR"
+        mask_fix = ((out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())) & (out["Remarks"] != "missing in PR")
         out.loc[mask_fix, inv_pr_col] = out.loc[mask_fix, "_INV_KEY"]
 
     def pick_from_list(columns, candidates):

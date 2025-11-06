@@ -178,8 +178,6 @@ VENDOR_NAME_PR_CANDIDATES = [
     "vendor name", "supplier name", "party name", "name of supplier", "vendor", "supplier"
 ]
 GSTR1_STATUS_2B_CANDIDATES = [
-    "gstr-1/iff/gstr-5 period",  # exact header present in 2B B2B & B2B-CDNR
-    "gstr1/iff/gstr5 period",    # normalized variant (safety)
     "gstr-1 filing status", "gstr1 filing status", "filing status", "filing status details",
     "gstr1 status", "gstr-1 status", "status", "tax period", "return period"
 ]
@@ -352,26 +350,61 @@ def parse_date_cell(x) -> Optional[datetime.date]:
     s = str(x).strip()
     if not s:
         return None
+
+    # Handle datetime/Timestamp objects first
     if isinstance(x, (pd.Timestamp, datetime)):
         try:
             return pd.to_datetime(x).date()
         except Exception:
             pass
-    if re.fullmatch(r"\d{4,6}", s):
-        dt = _parse_excel_serial(s)
-        if not pd.isna(dt):
-            return dt.date()
-    dt = pd.to_datetime(s, dayfirst=True, errors='coerce')
-    if not pd.isna(dt):
-        return dt.date()
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d",
-                "%d.%m.%Y", "%d-%b-%Y", "%d-%b-%y", "%d %b %Y",
-                "%m/%d/%Y", "%m-%d-%Y"):
+
+    # Try DD-MM-YYYY and DD/MM/YYYY first (your preferred format)
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
         try:
             return datetime.strptime(s, fmt).date()
         except Exception:
             continue
+
+    # Handle Excel serial numbers (5-6 digit numbers)
+    if re.fullmatch(r"\d{4,6}", s):
+        try:
+            dt = pd.to_datetime(float(s), origin='1899-12-30', unit='D', errors='coerce')
+            if not pd.isna(dt):
+                return dt.date()
+        except Exception:
+            pass
+
+    # Fallback: try pandas with dayfirst=True
+    try:
+        dt = pd.to_datetime(s, dayfirst=True, errors='coerce')
+        if not pd.isna(dt):
+            return dt.date()
+    except Exception:
+        pass
+
     return None
+
+def format_date_display(d) -> str:
+    """Format date object as DD-MM-YYYY string for display"""
+    if d is None or pd.isna(d):
+        return ""
+    if isinstance(d, str):
+        s = d.strip()
+        if not s:
+            return ""
+        # If already in DD-MM-YYYY format, return as-is
+        if re.match(r'\d{2}-\d{2}-\d{4}', s):
+            return s
+        # Try to parse and reformat
+        parsed = parse_date_cell(s)
+        if parsed:
+            return parsed.strftime("%d-%m-%Y")
+        return s
+    if isinstance(d, (datetime, pd.Timestamp)):
+        return d.strftime("%d-%m-%Y")
+    if hasattr(d, 'strftime'):  # datetime.date
+        return d.strftime("%d-%m-%Y")
+    return str(d)
 
 def parse_amount(x) -> float:
     s = as_text(x)
@@ -592,8 +625,7 @@ def build_pairwise_recon(
 
     if inv_pr_col in out.columns:
         out[inv_pr_col] = out[inv_pr_col].map(as_text)
-        # don't back-fill PR invoice when the row is "missing in PR"
-        mask_fix = ((out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())) & (out["Remarks"] != "missing in PR")
+        mask_fix = (out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())
         out.loc[mask_fix, inv_pr_col] = out.loc[mask_fix, "_INV_KEY"]
 
     def pick_from_list(columns, candidates):
@@ -1061,7 +1093,11 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             return df_
         df = df_.copy()
         df["_INV_DISPLAY"] = df[inv_col] if inv_col in df.columns else ""
-        df["_DATE_DISPLAY"] = df[date_col] if date_col and date_col in df.columns else ""
+        # Format dates as DD-MM-YYYY strings for display
+        if date_col and date_col in df.columns:
+            df["_DATE_DISPLAY"] = df[date_col].apply(format_date_display)
+        else:
+            df["_DATE_DISPLAY"] = ""
         df["_DISPLAY_SOURCE"] = source_tag
         return df
 

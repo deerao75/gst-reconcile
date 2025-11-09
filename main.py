@@ -1950,22 +1950,5 @@ def admin_change_password(user_id):
     flash(f'Password for {user_to_edit.email} has been updated.', 'success')
     return redirect(url_for('admin_dashboard'))
 
-# --- TEMPORARY ADMIN-MAKING ROUTE ---
-# WARNING: REMOVE THIS AFTER ONE USE FOR SECURITY
-@app.route('/make-me-admin-now-_a1b2c3d4e5_')
-def make_admin():
-    # IMPORTANT: Replace with your actual registered email
-    admin_email = 'deepak.rao@acertax.com'
-
-    user = User.query.filter_by(email=admin_email).first()
-    if user:
-        user.is_admin = True
-        db.session.commit()
-        flash(f'Success! User {user.email} has been promoted to admin.', 'success')
-    else:
-        flash(f'Error: User with email {admin_email} not found.', 'danger')
-
-    return redirect(url_for('index'))
-
 if __name__ == "__main__":
     app.run(debug=True)

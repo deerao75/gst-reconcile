@@ -28,12 +28,28 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-for-local-use-only
 # File upload limit
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB
 
-# Database: PostgreSQL on Render, SQLite locally
+# main.py
+
+# ... (keep other imports) ...
+
+# Database: Use persistent disk on Render, fallback to local file, or use PostgreSQL if specified
 database_url = os.environ.get("DATABASE_URL")
+
 if database_url:
+    # If DATABASE_URL is set (e.g., for PostgreSQL), use it.
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url.replace("postgres://", "postgresql://")
 else:
-    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///users.db"
+    # If no DATABASE_URL, use SQLite with logic for Render's persistent disk.
+    # Check if we are in the Render environment by looking for the disk mount path.
+    render_disk_path = "/mnt/data"
+    if os.path.exists(render_disk_path):
+        # We are on Render: use the persistent disk for the database.
+        db_path = os.path.join(render_disk_path, "users.db")
+    else:
+        # We are running locally: use a regular file in the project folder.
+        db_path = "users.db"
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
+
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 # ------- Initialize SQLAlchemy (for auth) -------

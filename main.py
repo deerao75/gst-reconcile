@@ -1268,8 +1268,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     return output.read()
 
 # ------- NEW: Background worker task (called by RQ) -------
-from rq import get_current_job
-import tempfile, os, time
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:

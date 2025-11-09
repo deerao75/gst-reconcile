@@ -1,24 +1,132 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>Choose Your Plan</h2>
-<div class="subscription-plans">
-  <div class="plan">
-    <h3>Half-Yearly</h3>
-    <div class="price">₹5,000 / month</div>
-    <p>Billed as ₹30,000 every 6 months</p>
-    <form method="POST">
-      <input type="hidden" name="plan" value="half-yearly">
-      <button type="submit">Subscribe</button>
-    </form>
-  </div>
-  <div class="plan">
-    <h3>Annual</h3>
-    <div class="price">₹10,000 / month</div>
-    <p>Billed as ₹120,000 yearly</p>
-    <form method="POST">
-      <input type="hidden" name="plan" value="annual">
-      <button type="submit">Subscribe</button>
-    </form>
+<style>
+  /* Container spacing so main content sits below top bar */
+  .subscribe-container {
+    display: flex;
+    justify-content: center;
+    padding: 64px 16px 48px; /* space from top bar + breathing room */
+    box-sizing: border-box;
+  }
+
+  .subscription-plans {
+    display: flex;
+    gap: 28px;
+    align-items: stretch;
+    justify-content: center;
+    flex-wrap: wrap;
+    max-width: 980px;
+    width: 100%;
+  }
+
+  .plan {
+    background: #ffffff;
+    border-radius: 10px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    padding: 28px;
+    width: 340px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .plan h3 {
+    margin: 0;
+    font-size: 1.2rem;
+    color: #111827;
+  }
+
+  .price {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #0b6b4a; /* pleasant green */
+  }
+
+  .billing {
+    color: #6b7280;
+    font-size: 0.95rem;
+  }
+
+  .plan p {
+    margin: 0;
+    color: #4b5563;
+  }
+
+  .plan form {
+    margin-top: auto;
+  }
+
+  .plan button {
+    background: #0b6b4a;
+    color: white;
+    border: 0;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+  }
+
+  .plan button:hover {
+    background: #08563b;
+  }
+
+  /* Responsive */
+  @media (max-width: 720px) {
+    .subscription-plans { gap: 18px; }
+    .plan { width: 100%; padding: 20px; }
+    .subscribe-container { padding-top: 42px; }
+  }
+
+  .subscribe-header {
+    text-align: center;
+    margin-top: 8px;
+    margin-bottom: 12px;
+  }
+  .subscribe-note {
+    text-align: center;
+    color: #6b7280;
+    margin-bottom: 18px;
+  }
+</style>
+
+<div class="subscribe-container">
+  <div style="width:100%;max-width:980px;">
+    <div class="subscribe-header">
+      <h2>Choose Your Plan</h2>
+      <div class="subscribe-note">All prices are inclusive of taxes where applicable. Secure payments via PayU.</div>
+    </div>
+
+    <div class="subscription-plans" role="list">
+      <div class="plan" role="listitem" aria-label="Half-Yearly Plan">
+        <h3>Half-Yearly</h3>
+        <div class="price">INR 2,000 / month</div>
+        <div class="billing">Billed as INR 12,000 for 6 months</div>
+        <p>Save and get uninterrupted access for 6 months.</p>
+
+        <form method="POST" action="{{ url_for('create_payment') }}">
+          <input type="hidden" name="plan" value="half-yearly">
+          <input type="hidden" name="amount" value="12000">
+          <input type="hidden" name="description" value="6-month subscription">
+          <button type="submit">Subscribe</button>
+        </form>
+      </div>
+
+      <div class="plan" role="listitem" aria-label="Annual Plan">
+        <h3>Annual</h3>
+        <div class="price">INR 1,667 / month</div>
+        <div class="billing">Billed as INR 20,000 for 1 year</div>
+        <p>Best value — discounted monthly equivalent for a full year.</p>
+
+        <form method="POST" action="{{ url_for('create_payment') }}">
+          <input type="hidden" name="plan" value="annual">
+          <input type="hidden" name="amount" value="20000">
+          <input type="hidden" name="description" value="1-year subscription">
+          <button type="submit">Subscribe</button>
+        </form>
+      </div>
+    </div>
   </div>
 </div>
 {% endblock %}

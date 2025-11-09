@@ -12,6 +12,7 @@ from typing import Optional, Dict, List, Tuple
 from collections import defaultdict
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session, jsonify
 import pandas as pd
+import secrets
 # ------- NEW: Queue & Google Drive imports -------
 from redis import Redis
 from rq import Queue, get_current_job
@@ -177,9 +178,15 @@ AVOID_RECIPIENT_GSTIN_FOR_PR = ["company gstin", "our gstin", "recipient gstin",
 VENDOR_NAME_PR_CANDIDATES = [
     "vendor name", "supplier name", "party name", "name of supplier", "vendor", "supplier"
 ]
+
+TRADE_NAME_2B_CANDIDATES = [
+    "trade or legal name", "trade/legal name", "trade name", "legal name",
+    "supplier trade name", "supplier legal name", "recipient trade name"
+]
+
 GSTR1_STATUS_2B_CANDIDATES = [
     "gstr-1 filing status", "gstr1 filing status", "filing status", "filing status details",
-    "gstr1 status", "gstr-1 status", "status", "tax period", "return period"
+    "gstr1 status", "gstr-1 status", "status", "tax period", "return period", "period"
 ]
 
 # -------------------- Column detection helpers --------------------
@@ -331,6 +338,7 @@ def inv_basic(s) -> str:
     v = as_text(s).upper()
     v = re.sub(r'\s+', '', v)
     # remove common FY prefix like "FY25-26/" or "2025-26/"
+
     v = _FY_HEAD.sub('', v)
     # remove trailing FY chunk like "/25-26" or "/2025-26"
     v = _FY_TAIL.sub('', v)
@@ -543,6 +551,8 @@ def reconcile(
     return out
 
 # -------------------- Pairwise combined output --------------------
+# main.py
+
 def build_pairwise_recon(
     df_pr: pd.DataFrame, df_2b: pd.DataFrame,
     inv_pr: str, gst_pr: str, date_pr: str, cgst_pr: str, sgst_pr: str, igst_pr: str,
@@ -554,15 +564,22 @@ def build_pairwise_recon(
     for c in list(pr.columns):
         if c not in ["_GST_KEY", "_INV_KEY"]:
             pr.rename(columns={c: f"{c}_PR"}, inplace=True)
+
     for c in list(b2.columns):
         if c not in ["_GST_KEY", "_INV_KEY"]:
             b2.rename(columns={c: f"{c}_2B"}, inplace=True)
 
     merged = pd.merge(pr, b2, on=["_GST_KEY", "_INV_KEY"], how="outer")
 
-    key_grp = merged.groupby(["_GST_KEY", "_INV_KEY"], dropna=False)
     pr_cols_all = [c for c in merged.columns if c.endswith("_PR")]
     b2_cols_all = [c for c in merged.columns if c.endswith("_2B")]
+
+    if pr_cols_all:
+        pr_orig_present = merged[pr_cols_all].fillna("").astype(str).apply(lambda col: col.str.strip() != "").any(axis=1)
+    else:
+        pr_orig_present = pd.Series(False, index=merged.index)
+
+    key_grp = merged.groupby(["_GST_KEY", "_INV_KEY"], dropna=False)
     for col in pr_cols_all:
         merged[col] = key_grp[col].transform(lambda s: s.ffill().bfill())
     for col in b2_cols_all:
@@ -581,7 +598,6 @@ def build_pairwise_recon(
     igst_pr_col = f"{igst_pr}_PR" if igst_pr else None
     igst_2b_col = f"{igst_2b}_2B" if igst_2b else None
 
-    # Mapping/remarks/reason (Almost Match when any field differs) — compare **without sign**
     mapping, remarks, reason = [], [], []
     for _, r in merged.iterrows():
         pr_inv_val = as_text(r.get(inv_pr_col, "")) if inv_pr_col in merged.columns else ""
@@ -606,12 +622,9 @@ def build_pairwise_recon(
         def neq_round_abs(a, b):
             return abs(round_rupee(a)) != abs(round_rupee(b))
 
-        if cgst_pr_col and cgst_2b_col and neq_round_abs(r.get(cgst_pr_col, 0), r.get(cgst_2b_col, 0)):
-            mismatches.append("CGST")
-        if sgst_pr_col and sgst_2b_col and neq_round_abs(r.get(sgst_pr_col, 0), r.get(sgst_2b_col, 0)):
-            mismatches.append("SGST")
-        if igst_pr_col and igst_2b_col and neq_round_abs(r.get(igst_pr_col, 0), r.get(igst_2b_col, 0)):
-            mismatches.append("IGST")
+        if cgst_pr_col and cgst_2b_col and neq_round_abs(r.get(cgst_pr_col, 0), r.get(cgst_2b_col, 0)): mismatches.append("CGST")
+        if sgst_pr_col and sgst_2b_col and neq_round_abs(r.get(sgst_pr_col, 0), r.get(sgst_2b_col, 0)): mismatches.append("SGST")
+        if igst_pr_col and igst_2b_col and neq_round_abs(r.get(igst_pr_col, 0), r.get(igst_2b_col, 0)): mismatches.append("IGST")
 
         if mismatches:
             mapping.append("Almost Matched"); remarks.append("mismatch"); reason.append("; ".join(mismatches))
@@ -626,7 +639,31 @@ def build_pairwise_recon(
     if inv_pr_col in out.columns:
         out[inv_pr_col] = out[inv_pr_col].map(as_text)
         mask_fix = (out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())
+        if isinstance(pr_orig_present, pd.Series):
+            mask_fix = mask_fix & pr_orig_present.reindex(out.index).fillna(False)
         out.loc[mask_fix, inv_pr_col] = out.loc[mask_fix, "_INV_KEY"]
+
+    # --- FIX: Targeted correction for CDNR GSTINs in the final output ---
+    # Find the column that indicates the source sheet (B2B or B2B-CDNR) for 2B data.
+    source_sheet_col = "_SOURCE_SHEET_2B"
+    if source_sheet_col in out.columns and gst_2b_col in out.columns:
+        # Identify rows that came from the B2B-CDNR sheet.
+        cdnr_mask = (out[source_sheet_col] == "B2B-CDNR")
+        # For those specific rows, overwrite the potentially incorrect GSTIN with the correct one from `_GST_KEY`.
+        out.loc[cdnr_mask, gst_2b_col] = out.loc[cdnr_mask, "_GST_KEY"]
+    # --- End of FIX ---
+
+    def pick_name_col(columns, candidates):
+        cnorm = [_norm(c) for c in candidates]
+        best = None; best_score = -1
+        for col in columns:
+            n = _norm(col); score = 0
+            if any(n == c for c in cnorm): score += 4
+            if any(c in n for c in cnorm): score += 2
+            if "name" in n: score += 1
+            if "date" in n or "period" in n or "month" in n: score -= 10
+            if score > best_score: best, best_score = col, score
+        return best if best_score > 0 else None
 
     def pick_from_list(columns, candidates):
         cnorm = [_norm(c) for c in candidates]
@@ -635,13 +672,39 @@ def build_pairwise_recon(
             n = _norm(col); score = 0
             if any(n == c for c in cnorm): score += 4
             if any(c in n for c in cnorm): score += 2
+            if "period" in n: score += 3
             if "name" in n: score += 1
             if score > best_score: best, best_score = col, score
         return best if best_score > 0 else None
 
     pr_cols_all = [c for c in out.columns if c.endswith("_PR")]
     b2_cols_all = [c for c in out.columns if c.endswith("_2B")]
-    vendor_name_pr = pick_from_list(pr_cols_all, [f"{x}_PR" for x in VENDOR_NAME_PR_CANDIDATES])
+
+    vendor_name_pr_col = pick_name_col(pr_cols_all, [f"{x}_PR" for x in VENDOR_NAME_PR_CANDIDATES])
+    vendor_name_2b_col = pick_name_col(b2_cols_all, [f"{x}_2B" for x in TRADE_NAME_2B_CANDIDATES + VENDOR_NAME_PR_CANDIDATES])
+
+    gstin_to_name = {}
+    def is_valid_name(name_str: str) -> bool:
+        if not name_str or pd.isna(name_str): return False
+        return not bool(GSTIN_REGEX.fullmatch(name_str.strip()))
+
+    def populate_name_map(df, gstin_col_key, name_col):
+        if name_col and gstin_col_key in df.columns:
+            for _, row in df[[gstin_col_key, name_col]].drop_duplicates().dropna().iterrows():
+                gstin = clean_gstin(row[gstin_col_key])
+                name = as_text(row[name_col])
+                if gstin and is_valid_name(name):
+                    if gstin not in gstin_to_name or len(name) > len(gstin_to_name[gstin]):
+                        gstin_to_name[gstin] = name
+
+    populate_name_map(out, "_GST_KEY", vendor_name_pr_col)
+    populate_name_map(out, "_GST_KEY", vendor_name_2b_col)
+
+    if gstin_to_name:
+        out["Vendor Name"] = out["_GST_KEY"].apply(lambda x: gstin_to_name.get(clean_gstin(x), ""))
+    else:
+        out["Vendor Name"] = ""
+
     gstr1_status_2b = pick_from_list(b2_cols_all, [f"{x}_2B" for x in GSTR1_STATUS_2B_CANDIDATES])
 
     pair_cols = [
@@ -653,8 +716,10 @@ def build_pairwise_recon(
         igst_pr_col, igst_2b_col,
     ]
     pair_cols = [c for c in pair_cols if c and c in out.columns]
-    keep_extra = [c for c in [vendor_name_pr, gstr1_status_2b] if c and c in out.columns]
-    front = ["_GST_KEY", "_INV_KEY", "Mapping", "Remarks", "Reason"]
+
+    keep_extra = [c for c in [gstr1_status_2b] if c and c in out.columns]
+
+    front = ["_GST_KEY", "_INV_KEY", "Mapping", "Remarks", "Reason", "Vendor Name"]
     final_cols = front + pair_cols + keep_extra
     out = out[final_cols]
 
@@ -662,11 +727,13 @@ def build_pairwise_recon(
     if gstr1_status_2b and gstr1_status_2b in out.columns:
         two_b_month_series = out[gstr1_status_2b]
     out["2B month"] = two_b_month_series
+
     return out, {
         "cgst_pr_col": cgst_pr_col, "sgst_pr_col": sgst_pr_col, "igst_pr_col": igst_pr_col,
         "cgst_2b_col": cgst_2b_col, "sgst_2b_col": sgst_2b_col, "igst_2b_col": igst_2b_col,
         "gstr1_status_2b_col": gstr1_status_2b
     }
+
 
 # -------------------- Dashboard --------------------
 def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
@@ -946,7 +1013,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     # --- Resolve columns for CDNR (note-based) ---
     note_2b_cdnr     = ensure_col(df_cdnr_raw, note_2b_cdnr_sel, NOTE_NO_CANDIDATES_2B)
     notedate_2b_cdnr = ensure_col(df_cdnr_raw, notedate_2b_cdnr_sel, NOTE_DATE_CANDIDATES_2B)
-    note_type_2b     = ensure_col(df_cdnr_raw, "", NOTE_TYPE_CANDIDATES_2B)  # auto-pick
+    note_type_2b = ensure_col(df_cdnr_raw, "", NOTE_TYPE_CANDIDATES_2B)  # auto-pick
     if cdnr_note_hard:
         note_2b_cdnr = cdnr_note_hard
     if cdnr_ndate_hard:
@@ -1489,6 +1556,334 @@ def subscribe():
         else:
             flash('Invalid plan selected.')
     return render_template('subscribe.html')
+
+from typing import Any, Dict, Optional
+import os
+import hashlib
+
+def _sanitize_env_value(val: Optional[str]) -> str:
+    """Strip whitespace and inline comments from env-var values."""
+    if val is None:
+        return ""
+    s = str(val)
+    if "#" in s:
+        s = s.split("#", 1)[0]
+    return s.strip()
+
+
+def _format_amount(amount_raw: Any) -> str:
+    """Force amount to two-decimal string (e.g. 20000 → 20000.00)."""
+    try:
+        return "{:.2f}".format(float(amount_raw))
+    except (ValueError, TypeError):
+        return str(amount_raw).strip()
+
+
+def build_hash_sequence(params: Dict[str, Any], salt: str) -> str:
+    """
+    Return the *exact* pipe-separated string that PayU hashes.
+    The order is fixed – 18 fields, 6 of them empty after udf5.
+    """
+    def _trim(x):
+        return "" if x is None else str(x).strip()
+
+    # ---- mandatory fields -------------------------------------------------
+    key         = _trim(params.get("key", _sanitize_env_value(os.getenv("PAYU_MERCHANT_KEY", ""))))
+    txnid       = _trim(params.get("txnid", ""))
+    amount      = _format_amount(params.get("amount", "0"))
+    productinfo = _trim(params.get("productinfo", ""))
+    firstname   = _trim(params.get("firstname", ""))
+    email       = _trim(params.get("email", ""))
+
+    # ---- validation -------------------------------------------------------
+    if not firstname:
+        raise ValueError("firstname is required and cannot be empty")
+    if "@" in firstname:
+        raise ValueError("firstname cannot be an e-mail address – use the actual name")
+
+    # ---- UDF 1-5 (always present, even if empty) -------------------------
+    udf1 = _trim(params.get("udf1", ""))
+    udf2 = _trim(params.get("udf2", ""))
+    udf3 = _trim(params.get("udf3", ""))
+    udf4 = _trim(params.get("udf4", ""))
+    udf5 = _trim(params.get("udf5", ""))
+
+    # ---- final parts -------------------------------------------------------
+    parts = [
+        key, txnid, amount, productinfo, firstname, email,
+        udf1, udf2, udf3, udf4, udf5,
+        "", "", "", "", "", "",          # **exactly 6** empty fields
+        salt
+    ]
+    return "|".join(parts)
+
+
+def payu_hash(
+    params: Dict[str, Any],
+    salt: Optional[str] = None,
+    merchant_key: Optional[str] = None,
+) -> str:
+    """
+    Compute PayU SHA-512 hash (lowercase hex).
+
+    * `salt` – explicit salt for local testing; otherwise reads PAYU_SALT env var.
+    * `merchant_key` – optional override for the key (adds/replaces params['key']).
+    """
+    if merchant_key:
+        params = dict(params)
+        params["key"] = merchant_key
+
+    salt_val = _sanitize_env_value(salt if salt is not None else os.getenv("PAYU_SALT", ""))
+    if not salt_val:
+        raise ValueError("PayU SALT is missing – set PAYU_SALT env var or pass it explicitly")
+
+    seq = build_hash_sequence(params, salt_val)
+    return hashlib.sha512(seq.encode("utf-8")).hexdigest().lower()
+
+# Add this compatibility wrapper right after the `payu_hash` function
+def _payu_hash(params, salt=None, merchant_key=None):
+    """
+    Backwards-compatible wrapper expected by legacy call-sites.
+    Delegates to the canonical `payu_hash` implementation.
+    """
+    return payu_hash(params, salt=salt, merchant_key=merchant_key)
+
+# -------------------------------------------------------------------------
+# Helper for safe logging (replaces the real salt with <SALT>)
+# -------------------------------------------------------------------------
+def masked_sequence(full_seq: str, salt: str) -> str:
+    if not salt:
+        return full_seq.rsplit("|", 1)[0] + "|<SALT>" if "|" in full_seq else full_seq
+    if full_seq.endswith(salt):
+        return full_seq[:-len(salt)] + "<SALT>"
+    return full_seq.rsplit("|", 1)[0] + "|<SALT>" if "|" in full_seq else full_seq
+
+
+# -------------------------------------------------------------------------
+# Stand-alone test (run with `python payu_hash.py`)
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    test_params = {
+        "key": "pqBnUd",
+        "txnid": "txn_1762602100_343f2d0a76e1",
+        "amount": "20000",
+        "productinfo": "1-year subscription",
+        "firstname": "Deepak Rao",               # ← **REAL NAME**
+        "email": "deepak.rao@acertax.com",
+        "udf1": "annual",
+        # udf2-udf5 are omitted → will be empty strings
+    }
+    TEST_SALT = "vVZxI7Upbecje3BdcJgjhP6kKmMppX0W"   # **only for local testing**
+
+    seq = build_hash_sequence(test_params, TEST_SALT)
+    masked = masked_sequence(seq, TEST_SALT)
+    computed = payu_hash(test_params, salt=TEST_SALT)
+
+    print("Masked pipe-sequence:")
+    print(masked)
+    print("Field count:", len(seq.split("|")), "(expected 18)\n")
+    print("Computed hash:")
+    print(computed)
+
+    expected = "aa0eead674b8d1e3ea15c0268f003fff7fe66fb8138f71bba5b644f55a30faf316bed6320d56ec9480787ef924c667563aa1d8e210475a18c6a3eb887b118b4a"
+    print("\nPayU expected:")
+    print(expected)
+    print("MATCH?", computed == expected)
+
+def verify_payu_response(posted: dict) -> bool:
+    """
+    Verify PayU response (compare posted 'hash' or 'sha2' with computed value).
+    Response hash formula:
+      sha512(salt|status|udf10|udf9|...|udf1|email|firstname|productinfo|amount|txnid|key)
+    """
+    posted_hash = (posted.get("hash") or posted.get("sha2") or "").strip().lower()
+    status = str(posted.get("status", "")).strip()
+    txnid = str(posted.get("txnid", "")).strip()
+    amount = str(posted.get("amount", "")).strip()
+    productinfo = str(posted.get("productinfo", "")).strip()
+    firstname = str(posted.get("firstname", "")).strip()
+    email = str(posted.get("email", "")).strip()
+    key = str(posted.get("key", os.environ.get("PAYU_MERCHANT_KEY", "") or "")).strip()
+    salt = os.environ.get("PAYU_SALT", "").strip()
+
+    # collect udf10..udf1 from posted (use empty strings if not present)
+    udf_list = []
+    for i in range(10, 0, -1):
+        udf_list.append(str(posted.get(f"udf{i}", "") or "").strip())
+
+    parts = [salt, status] + udf_list + [email, firstname, productinfo, amount, txnid, key]
+    hash_seq = "|".join(parts)
+    calc_hash = hashlib.sha512(hash_seq.encode("utf-8")).hexdigest().lower()
+    return calc_hash == posted_hash
+
+# Insert/replace the following helper and the `create_payment` route in main.py
+
+import hashlib
+import os
+from flask import request, session, url_for
+import html
+import time
+import secrets
+import re
+
+# ... (keep your other imports and Flask app setup) ...
+
+def payu_request_hash(params: dict) -> str:
+    """
+    Computes the PayU request hash using the exact formula:
+    sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
+    This means exactly 5 empty placeholders after udf5.
+    """
+    payu_salt = os.environ.get("PAYU_SALT", "").strip()
+
+    # The order of fields is absolutely critical.
+    hash_parts = [
+        str(params.get("key", "")),
+        str(params.get("txnid", "")),
+        str(params.get("amount", "")),
+        str(params.get("productinfo", "")),
+        str(params.get("firstname", "")),
+        str(params.get("email", "")),
+        str(params.get("udf1", "")),
+        str(params.get("udf2", "")),
+        str(params.get("udf3", "")),
+        str(params.get("udf4", "")),
+        str(params.get("udf5", "")),
+        "",  # Placeholder 1
+        "",  # Placeholder 2
+        "",  # Placeholder 3
+        "",  # Placeholder 4
+        "",  # Placeholder 5
+    ]
+
+    hash_sequence_str = "|".join(hash_parts) + "|" + payu_salt
+
+    # Compute and return the lowercase hex digest.
+    calculated_hash = hashlib.sha512(hash_sequence_str.encode('utf-8')).hexdigest().lower()
+    return calculated_hash
+
+@app.route("/create_payment", methods=["POST"])
+def create_payment():
+    """
+    Creates and submits the payment request to PayU with the corrected hash.
+    """
+    # Read and format inputs
+    plan = request.form.get("plan", "half-yearly")
+    amount_raw = request.form.get("amount", "0")
+    productinfo = request.form.get("description", "Subscription").strip()
+    phone = request.form.get("phone", "")
+
+    try:
+        amount = "{:.2f}".format(float(amount_raw))
+    except (ValueError, TypeError):
+        amount = "0.00"
+
+    email = (session.get("email") or request.form.get("email") or "").strip()
+    if email and "@" in email:
+        firstname = email.split('@', 1)[0].lower()
+    else:
+        firstname = "guest"
+
+    # Read environment variables and validate
+    payu_key = os.environ.get("PAYU_MERCHANT_KEY", "").strip()
+    payu_salt = os.environ.get("PAYU_SALT", "").strip()
+    payu_url = os.environ.get("PAYU_BASE_URL", "https://test.payu.in/_payment").strip()
+
+    if not payu_key or not payu_salt:
+        return "<h2>Configuration Error: PAYU_MERCHANT_KEY or PAYU_SALT is not set.</h2>", 500
+
+    # Assemble all parameters for the form submission
+    txnid = f"txn_{int(time.time())}_{secrets.token_hex(6)}"
+    payu_params = {
+        "key": payu_key, "txnid": txnid, "amount": amount, "productinfo": productinfo,
+        "firstname": firstname, "email": email, "phone": phone,
+        "surl": url_for("payment_success", _external=True),
+        "furl": url_for("payment_fail", _external=True),
+        "udf1": plan, "udf2": "", "udf3": "", "udf4": "", "udf5": "",
+        "udf6": "", "udf7": "", "udf8": "", "udf9": "", "udf10": "",
+        "service_provider": "payu_paisa"
+    }
+
+    # Calculate the hash using the new, correct function
+    payu_params['hash'] = payu_request_hash(payu_params)
+
+    # Render the auto-submitting form
+    return f"""
+    <!doctype html><html><head><title>Redirecting to PayU...</title></head>
+    <body onload="document.getElementById('payu_form').submit();">
+      <h3>Redirecting to PayU...</h3>
+      <form id="payu_form" method="POST" action="{html.escape(payu_url)}">
+        {''.join([f'<input type="hidden" name="{k}" value="{html.escape(str(v))}">' for k, v in payu_params.items()])}
+        <input type="submit" value="Click here if you are not redirected">
+      </form>
+    </body></html>
+    """
+
+from flask import Flask, render_template, render_template_string, request, send_file, flash, redirect, url_for, session, jsonify
+@app.route("/compare_payu_seq", methods=["POST"])
+def compare_payu_seq():
+    our_seq = request.form.get("our_seq", "")
+    payu_seq = request.form.get("payu_seq", "")
+    def diff_lines(a, b):
+        # simple diff: show both and indicate equal/unequal
+        same = (a.strip() == b.strip())
+        return {"same": same, "our_seq": a, "payu_seq": b}
+    res = diff_lines(our_seq, payu_seq)
+    # render minimal result
+    return render_template_string("""
+      <h2>Compare result</h2>
+      <p>Sequences identical: <strong>{{same}}</strong></p>
+      <h3>Our sequence (masked)</h3><pre>{{our_seq}}</pre>
+      <h3>PayU provided sequence</h3><pre>{{payu_seq}}</pre>
+      <p><a href="#" onclick="history.back(); return false;">Back</a></p>
+    """, **res)
+
+# PayU success/failure endpoints (surl/furl) — adapt to verify and update DB
+@app.route("/payment_success", methods=["POST", "GET"])
+def payment_success():
+    posted = request.form.to_dict() if request.form else request.args.to_dict()
+    ok = verify_payu_response(posted)
+    if not ok:
+        # log suspicious payload and show error
+        app.logger.warning("PayU verification failed for payload: %s", {k: posted.get(k) for k in posted.keys() if k != 'hash' and k != 'sha2'})
+        return render_template("payment_failed.html", reason="Hash verification failed", data=posted), 400
+
+    # verify txnid/amount match DB record (if you persist txnid earlier)
+    # then update Transaction record and mark user's subscription active
+    return render_template("payment_success.html", data=posted)
+
+@app.route("/payment_fail", methods=["POST", "GET"])
+def payment_fail():
+    data = request.form.to_dict() or request.args.to_dict()
+    # TODO: log failure and show next steps to user
+    return render_template("payment_failed.html", data=data)
+
+# dev-only – paste into main.py while debugging (only when app.debug is True)
+@app.route("/_debug_env", methods=["GET"])
+def _debug_env():
+    if not app.debug:
+        return ("Not allowed", 403)
+    key = os.environ.get("PAYU_MERCHANT_KEY", "")
+    masked = (key[:4] + "..." ) if key else ""
+    return f"PAYU key present: {bool(key)}; masked key: {masked}; PAYU_BASE_URL: {os.environ.get('PAYU_BASE_URL')}"
+
+def debug_payu_hash_print(params: dict):
+    # prints masked sequence (salt replaced) and computed hash (with actual salt)
+    key = str(params.get("key", os.environ.get("PAYU_MERCHANT_KEY", ""))).strip()
+    txnid = str(params.get("txnid", "")).strip()
+    amount = "{:.2f}".format(float(params.get("amount", "0") or 0))
+    productinfo = str(params.get("productinfo","")).strip()
+    firstname = str(params.get("firstname","")).strip()
+    email = str(params.get("email","")).strip()
+    udf = [str(params.get(f"udf{i}", "") or "").strip() for i in range(1, 11)]
+    salt = os.environ.get("PAYU_SALT", "").strip()
+
+    parts_display = [key, txnid, amount, productinfo, firstname, email] + udf + ["<SALT>"]
+    display_seq = "|".join(parts_display)
+    calc = _payu_hash(params)
+    print("HASH SEQ (masked):", display_seq)
+    print("SHA512(hash_seq):", calc)
+    # Do NOT print the raw salt in logs in production..
 
 if __name__ == "__main__":
     app.run(debug=True)

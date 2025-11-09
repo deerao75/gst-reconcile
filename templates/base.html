@@ -260,9 +260,7 @@
     </div>
     <div class="nav-menu">
       {% if session.logged_in %}
-        <form method="POST" action="{{ url_for('logout') }}" style="display:inline;">
-          <button type="submit">Logout</button>
-        </form>
+        <a href="{{ url_for('logout') }}" class="btn btn-secondary">Logout</a>
         <a href="{{ url_for('subscribe') }}">Subscribe</a>
       {% else %}
         <a href="{{ url_for('login') }}">Login</a>

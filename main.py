@@ -41,11 +41,14 @@ from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy(app)
 
 # User Model (for login/subscribe)
+# main.py
+
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(200), nullable=False)
     subscribed = db.Column(db.Boolean, default=False)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)  # <-- ADD THIS LINE
     def __repr__(self):
         return f'<User {self.email}>'
 
@@ -933,6 +936,8 @@ def _append_if_missing(target_list: List[str], candidates: List[Optional[str]]) 
         if c and (c not in target_list):
             target_list.append(c)
 
+# main.py
+
 def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
                                  # B2B (invoice-based)
                                  inv_2b_b2b_sel: str, gst_2b_b2b_sel: str, date_2b_b2b_sel: str, cgst_2b_b2b_sel: str, sgst_2b_b2b_sel: str, igst_2b_b2b_sel: str,
@@ -964,7 +969,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)
 
-    # ---- normalized selection helpers ----
     def match_provided(df: pd.DataFrame, provided: str) -> Optional[str]:
         if not provided:
             return None
@@ -1002,7 +1006,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     cdnr_note_hard  = _pick_col_contains(df_cdnr_raw, r"\bnote\s*number\b")
     cdnr_ndate_hard = _pick_col_contains(df_cdnr_raw, r"\bnote\s*date\b")
 
-    # --- Resolve columns for B2B (invoice-based) ---
     inv_2b_b2b = ensure_col(df_b2b_raw, inv_2b_b2b_sel, INVOICE_CANDIDATES_2B)
     gst_2b_b2b = ensure_col(df_b2b_raw, gst_2b_b2b_sel, GSTIN_CANDIDATES_2B)
     date_2b_b2b = ensure_col(df_b2b_raw, date_2b_b2b_sel, DATE_CANDIDATES_2B)
@@ -1010,10 +1013,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     sgst_2b_b2b = ensure_col(df_b2b_raw, sgst_2b_b2b_sel, SGST_CANDIDATES_2B)
     igst_2b_b2b = ensure_col(df_b2b_raw, igst_2b_b2b_sel, IGST_CANDIDATES_2B)
 
-    # --- Resolve columns for CDNR (note-based) ---
     note_2b_cdnr     = ensure_col(df_cdnr_raw, note_2b_cdnr_sel, NOTE_NO_CANDIDATES_2B)
     notedate_2b_cdnr = ensure_col(df_cdnr_raw, notedate_2b_cdnr_sel, NOTE_DATE_CANDIDATES_2B)
-    note_type_2b = ensure_col(df_cdnr_raw, "", NOTE_TYPE_CANDIDATES_2B)  # auto-pick
+    note_type_2b = ensure_col(df_cdnr_raw, "", NOTE_TYPE_CANDIDATES_2B)
     if cdnr_note_hard:
         note_2b_cdnr = cdnr_note_hard
     if cdnr_ndate_hard:
@@ -1025,30 +1027,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     sgst_2b_cdnr = ensure_col(df_cdnr_raw, sgst_2b_cdnr_sel, SGST_CANDIDATES_2B)
     igst_2b_cdnr = ensure_col(df_cdnr_raw, igst_2b_cdnr_sel, IGST_CANDIDATES_2B)
 
-    # ==== DEBUG: column resolution ====
-    def _exists(df, name):
-        return bool(name) and (name in df.columns)
-    def _nn(df, c):
-        if not c or c not in df.columns: return -1
-        return int(pd.Series(df[c]).astype(str).str.strip().ne("").sum())
-
-    print("RESOLVED COLUMNS -> ",
-          "\n  B2B:", inv_2b_b2b, gst_2b_b2b, date_2b_b2b, cgst_2b_b2b, sgst_2b_b2b, igst_2b_b2b,
-          "\n  CDNR:", note_2b_cdnr, gst_2b_cdnr, notedate_2b_cdnr, cgst_2b_cdnr, sgst_2b_cdnr, igst_2b_cdnr, "| NOTE TYPE:", note_type_2b,
-          "\n  PR:", match_provided(df_pr_raw, inv_pr_sel) or inv_pr_sel, match_provided(df_pr_raw, gst_pr_sel) or gst_pr_sel, date_pr_sel, cgst_pr_sel, sgst_pr_sel, igst_pr_sel)
-    print("EXISTENCE CHECK ->",
-          "\n  B2B:", _exists(df_b2b_raw, inv_2b_b2b), _exists(df_b2b_raw, gst_2b_b2b), _exists(df_b2b_raw, date_2b_b2b),
-          _exists(df_b2b_raw, cgst_2b_b2b), _exists(df_b2b_raw, sgst_2b_b2b), _exists(df_b2b_raw, igst_2b_b2b),
-          "\n  CDNR:", _exists(df_cdnr_raw, note_2b_cdnr), _exists(df_cdnr_raw, gst_2b_cdnr), _exists(df_cdnr_raw, notedate_2b_cdnr),
-          _exists(df_cdnr_raw, cgst_2b_cdnr), _exists(df_cdnr_raw, sgst_2b_cdnr), _exists(df_cdnr_raw, igst_2b_cdnr),
-          "\n  PR:", _exists(df_pr_raw, inv_pr_sel), _exists(df_pr_raw, gst_pr_sel), _exists(df_pr_raw, date_pr_sel),
-          _exists(df_pr_raw, cgst_pr_sel), _exists(df_pr_raw, sgst_pr_sel), _exists(df_pr_raw, igst_pr_sel))
-    print("NON-NULL COUNTS ->",
-          "\n  PR:", "Inv", _nn(df_pr_raw, inv_pr_sel), "| GSTIN", _nn(df_pr_raw, gst_pr_sel),
-          "\n  B2B:", "Inv", _nn(df_b2b_raw, inv_2b_b2b), "| GSTIN", _nn(df_b2b_raw, gst_2b_b2b),
-          "\n  CDNR:", "Note", _nn(df_cdnr_raw, note_2b_cdnr), "| GSTIN", _nn(df_cdnr_raw, gst_2b_cdnr))
-
-    # ---------------- Apply sign logic ----------------
     def apply_signs(df, note_type_col: Optional[str]) -> pd.DataFrame:
         if df.empty:
             return df
@@ -1063,7 +1041,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         if note_type_col and note_type_col in df.columns:
             df["_NOTE_TYPE"] = df[note_type_col].map(normalize_note_type)
         else:
-            # fallback: infer from obvious tokens in note number; if CDNR and unknown -> credit
             def infer(row):
                 note = as_text(row.get(_pick_best_note_col(df, None) or "", ""))
                 s = note.lower()
@@ -1083,7 +1060,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     df_b2b_raw = apply_signs(df_b2b_raw, note_type_col=None)
     df_cdnr_raw = apply_signs(df_cdnr_raw, note_type_col=note_type_2b)
 
-    # ---------- Column resolution for PR after normalization ----------
     gst_pr = match_provided(df_pr_raw, gst_pr_sel) or ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
                         penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
                         value_picker=lambda d: pick_gstin_by_values(d, prefer_supplier=True))
@@ -1096,7 +1072,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     sgst_pr = match_provided(df_pr_raw, sgst_pr_sel) or ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
     igst_pr = match_provided(df_pr_raw, igst_pr_sel) or ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
 
-    # ---------------- Optional numeric columns ----------------
     def optional_numeric_list(df_):
         res = []
         for pool in [[ "taxable value","taxable amount","assessable value","taxable" ],
@@ -1121,7 +1096,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     opt_pr = optional_numeric_list(df_pr_raw)
     _append_if_missing(opt_pr, [cgst_pr, sgst_pr, igst_pr])
 
-    # ---------------- Consolidate ----------------
     df_2b_b2b = consolidate_by_key(
         df=df_b2b_raw, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b,
         date_col=date_2b_b2b, numeric_cols=opt_2b_b2b
@@ -1134,33 +1108,17 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     if not df_2b_cdnr.empty:
         df_2b_cdnr = _rescue_empty_inv_keys(df_2b_cdnr, inv_col=note_2b_cdnr)
-        print("CDNR Note column picked:", note_2b_cdnr)
-        print("CDNR Note date column:", notedate_2b_cdnr)
-        pct_empty = (
-            (df_2b_cdnr["_INV_KEY"].astype(str).str.strip() == "") |
-            (df_2b_cdnr["_INV_KEY"].isna())
-        ).mean()
-        print(f"CDNR empty _INV_KEY %: {pct_empty:.2%}")
-        try:
-            cols_to_show = ["_GST_KEY", "_INV_KEY"]
-            if note_2b_cdnr in df_2b_cdnr.columns:
-                cols_to_show.append(note_2b_cdnr)
-            print(df_2b_cdnr.head(5)[cols_to_show])
-        except Exception:
-            pass
 
     df_pr = consolidate_by_key(
         df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr,
         date_col=date_pr, numeric_cols=opt_pr
     )
 
-    # ---------- display columns ----------
     def add_display_cols(df_, inv_col, date_col, source_tag):
         if df_.empty:
             return df_
         df = df_.copy()
         df["_INV_DISPLAY"] = df[inv_col] if inv_col in df.columns else ""
-        # Format dates as DD-MM-YYYY strings for display
         if date_col and date_col in df.columns:
             df["_DATE_DISPLAY"] = df[date_col].apply(format_date_display)
         else:
@@ -1171,10 +1129,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     df_2b_b2b = add_display_cols(df_2b_b2b, inv_2b_b2b, date_2b_b2b, "B2B")
     df_2b_cdnr = add_display_cols(df_2b_cdnr, note_2b_cdnr, notedate_2b_cdnr, "B2B-CDNR")
 
-    # Keep note type (Debit/Credit) on CDNR consolidated rows for final output
     if "_NOTE_TYPE" in df_cdnr_raw.columns and not df_2b_cdnr.empty:
-        # Best-effort carry: if original had _NOTE_TYPE per row, we can't aggregate a list;
-        # use first encountered per key which is fine for typical CDNR rows
         nt_map = (df_cdnr_raw.assign(_GST_KEY=df_cdnr_raw[gst_2b_cdnr].map(clean_gstin),
                                      _INV_KEY=df_cdnr_raw[note_2b_cdnr].map(inv_basic))
                             .dropna(subset=["_GST_KEY","_INV_KEY"]))
@@ -1183,7 +1138,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     df_2b = pd.concat([df_2b_b2b, df_2b_cdnr], ignore_index=True) if (not df_2b_b2b.empty or not df_2b_cdnr.empty) else df_2b_b2b
 
-    # ---------- build pairwise recon ----------
     combined_df, pair_cols = build_pairwise_recon(
         df_pr=df_pr, df_2b=df_2b,
         inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr,
@@ -1198,6 +1152,14 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         recon_lookup[key] = (row.get("Mapping", ""), row.get("Remarks", ""), row.get("Reason", ""))
 
     pr_comments = df_pr_raw.copy()
+
+    # --- FIX: Convert numeric columns in `pr_comments` to numbers ---
+    # This ensures that sums and formats are correct in the final Excel sheet.
+    numeric_pr_cols_to_convert = [col for col in opt_pr if col in pr_comments.columns]
+    for col in numeric_pr_cols_to_convert:
+        pr_comments[col] = pd.to_numeric(pr_comments[col], errors='coerce').fillna(0)
+    # --- End of FIX ---
+
     if gst_pr in pr_comments.columns and inv_pr in pr_comments.columns:
         pr_comments["_GST_KEY"] = pr_comments[gst_pr].map(clean_gstin)
         pr_comments["_INV_KEY"] = pr_comments[inv_pr].map(inv_basic)
@@ -1210,11 +1172,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
 
-    # ---------------- Dashboard (transposed) ----------------
     dashboard_df = build_dashboard(combined_df, pair_cols)
     dashboard_tx = dashboard_df.set_index("Status").reset_index()
 
-    # ---------------- Add extra columns to Reconciliation ----------------
     invoice_type_map = df_2b_b2b.set_index(["_GST_KEY", "_INV_KEY"]).get("_SOURCE_SHEET", pd.Series()).to_dict() \
         if not df_2b_b2b.empty else {}
     note_type_map = df_2b_cdnr.set_index(["_GST_KEY", "_INV_KEY"]).get("_NOTE_TYPE", pd.Series()).to_dict() \
@@ -1222,7 +1182,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     combined_df["Invoice Type"] = combined_df.apply(
         lambda r: invoice_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), ""), axis=1)
-    # Capitalise nicely for display
     combined_df["Note Type"] = combined_df.apply(
         lambda r: {"credit":"Credit Note","debit":"Debit Note"}.get(note_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), "").lower(), ""), axis=1)
 
@@ -1233,7 +1192,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             cols.insert(idx, cols.pop(cols.index(c)))
         combined_df = combined_df[cols]
 
-    # --------- FAST XLSX WRITER (XlsxWriter) ---------
     def _autosize_ws(ws, df, min_w=12, max_w=48):
         sample = df.head(200)
         for col_idx, col_name in enumerate(df.columns):
@@ -1256,7 +1214,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         wb = writer.book
         header_fmt = wb.add_format({"bold": True})
 
-        # ---------------- Reconciliation ----------------
         combined_df.to_excel(writer, index=False, sheet_name="Reconciliation")
         ws = writer.sheets["Reconciliation"]
         ws.freeze_panes(1, 0)
@@ -1264,7 +1221,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         ws.set_row(0, None, header_fmt)
         _autosize_ws(ws, combined_df)
 
-        # ---------------- Dashboard (manual header; MI-safe) ----------------
         ws2 = writer.book.add_worksheet("Dashboard")
         writer.sheets["Dashboard"] = ws2
         hdr_bold = header_fmt
@@ -1323,7 +1279,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             ws2.set_column(c, c, 14)
         ws2.set_column(0, 0, 12)
 
-        # ---------------- PR - Comments ----------------
         pr_comments.to_excel(writer, index=False, sheet_name="PR - Comments")
         ws3 = writer.sheets["PR - Comments"]
         ws3.freeze_panes(1, 0)
@@ -1504,6 +1459,28 @@ def login():
             flash('Invalid email or password.')
     return render_template('login.html')
 
+# @app.route('/register', methods=['GET', 'POST'])
+# def register():
+#     if request.method == 'POST':
+#         email = request.form['email']
+#         password = request.form['password']
+#         if User.query.filter_by(email=email).first():
+#             flash('Email already registered.')
+#         else:
+#             new_user = User(
+#                 email=email,
+#                 password_hash=generate_password_hash(password)
+#             )
+#             db.session.add(new_user)
+#             db.session.commit()
+#             flash('Registration successful. Please log in.')
+#             return redirect(url_for('login'))
+#     return render_template('register.html')
+
+# main.py - Temporary register route to create an admin
+
+# main.py - Original/Correct Register Route
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -1512,13 +1489,14 @@ def register():
         if User.query.filter_by(email=email).first():
             flash('Email already registered.')
         else:
+            # The User model now correctly defaults is_admin to False
             new_user = User(
                 email=email,
                 password_hash=generate_password_hash(password)
             )
             db.session.add(new_user)
             db.session.commit()
-            flash('Registration successful. Please log in.')
+            flash('Registration successful. Please log in.', 'success')
             return redirect(url_for('login'))
     return render_template('register.html')
 
@@ -1884,6 +1862,77 @@ def debug_payu_hash_print(params: dict):
     print("HASH SEQ (masked):", display_seq)
     print("SHA512(hash_seq):", calc)
     # Do NOT print the raw salt in logs in production..
+
+
+from functools import wraps
+
+# --- Admin Functionality ---
+
+def admin_required(f):
+    """Decorator to ensure a user is logged in and is an admin."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            flash('Please log in to access this page.', 'warning')
+            return redirect(url_for('login'))
+
+        user = User.query.filter_by(email=session.get('email')).first()
+        if not user or not user.is_admin:
+            flash('You do not have permission to access the admin dashboard.', 'danger')
+            return redirect(url_for('index'))
+
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/admin')
+@admin_required
+def admin_dashboard():
+    """Displays the admin dashboard with a list of all users."""
+    all_users = User.query.order_by(User.id).all()
+    return render_template('admin.html', users=all_users)
+
+@app.route('/admin/user/<int:user_id>/delete', methods=['POST'])
+@admin_required
+def admin_delete_user(user_id):
+    """Deletes a user. Admins cannot delete themselves."""
+    admin_user = User.query.filter_by(email=session.get('email')).first()
+    if admin_user.id == user_id:
+        flash('Admins cannot delete their own account.', 'danger')
+        return redirect(url_for('admin_dashboard'))
+
+    user_to_delete = User.query.get_or_404(user_id)
+    db.session.delete(user_to_delete)
+    db.session.commit()
+    flash(f'User {user_to_delete.email} has been deleted.', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/user/<int:user_id>/toggle_subscription', methods=['POST'])
+@admin_required
+def admin_toggle_subscription(user_id):
+    """Toggles a user's subscription status."""
+    user_to_edit = User.query.get_or_404(user_id)
+    # The checkbox sends 'on' when checked, and nothing when unchecked.
+    user_to_edit.subscribed = 'subscribed' in request.form
+    db.session.commit()
+    status = "activated" if user_to_edit.subscribed else "deactivated"
+    flash(f'Subscription for {user_to_edit.email} has been {status}.', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/user/<int:user_id>/change_password', methods=['POST'])
+@admin_required
+def admin_change_password(user_id):
+    """Changes a user's password."""
+    user_to_edit = User.query.get_or_404(user_id)
+    new_password = request.form.get('new_password')
+
+    if not new_password or len(new_password) < 6:
+        flash('Password must be at least 6 characters long.', 'danger')
+        return redirect(url_for('admin_dashboard'))
+
+    user_to_edit.password_hash = generate_password_hash(new_password)
+    db.session.commit()
+    flash(f'Password for {user_to_edit.email} has been updated.', 'success')
+    return redirect(url_for('admin_dashboard'))
 
 if __name__ == "__main__":
     app.run(debug=True)

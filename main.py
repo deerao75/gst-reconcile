@@ -1955,7 +1955,7 @@ def admin_change_password(user_id):
 @app.route('/make-me-admin-now-_a1b2c3d4e5_')
 def make_admin():
     # IMPORTANT: Replace with your actual registered email
-    admin_email = 'your-email@example.com'
+    admin_email = 'deepak.rao@acertax.com'
 
     user = User.query.filter_by(email=admin_email).first()
     if user:

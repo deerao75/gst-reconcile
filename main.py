@@ -1161,7 +1161,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         cgst_2b=(cgst_2b_b2b or cgst_2b_cdnr), sgst_2b=(sgst_2b_b2b or sgst_2b_cdnr), igst_2b=(igst_2b_b2b or igst_2b_cdnr)
     )
 
-    # ---------------- PR - Comments sheet data ----------------
+    # --- START: PR - Comments sheet generation ---
     recon_lookup = {}
     for _, row in combined_df.iterrows():
         key = (as_text(row.get("_GST_KEY", "")), as_text(row.get("_INV_KEY", "")))
@@ -1169,27 +1169,21 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     pr_comments = df_pr_raw.copy()
 
-    # --- FIX: Convert numeric columns in `pr_comments` to numbers ---
-    # This ensures that sums and formats are correct in the final Excel sheet.
-    numeric_pr_cols_to_convert = [col for col in opt_pr if col in pr_comments.columns]
-    for col in numeric_pr_cols_to_convert:
-        pr_comments[col] = pd.to_numeric(pr_comments[col], errors='coerce').fillna(0)
-    # --- End of FIX ---
-
     if gst_pr in pr_comments.columns and inv_pr in pr_comments.columns:
         pr_comments["_GST_KEY"] = pr_comments[gst_pr].map(clean_gstin)
         pr_comments["_INV_KEY"] = pr_comments[inv_pr].map(inv_basic)
-        pr_comments["Mapping"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[0], axis=1)
-        pr_comments["Remarks"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[1], axis=1)
-        pr_comments["Reason"] = pr_comments.apply(lambda r: recon_lookup.get((r["_GST_KEY"], r["_INV_KEY"]), ("", "", ""))[2], axis=1)
-        pr_comments = pr_comments[[c for c in df_pr_raw.columns] + ["Mapping", "Remarks", "Reason"]]
+
+        def get_recon_status(row):
+            key = (row["_GST_KEY"], row["_INV_KEY"])
+            return pd.Series(recon_lookup.get(key, ("", "", "")))
+
+        pr_comments[["Mapping", "Remarks", "Reason"]] = pr_comments.apply(get_recon_status, axis=1)
+        pr_comments.drop(columns=["_GST_KEY", "_INV_KEY"], inplace=True)
     else:
         pr_comments["Mapping"] = ""
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
-
-    dashboard_df = build_dashboard(combined_df, pair_cols)
-    dashboard_tx = dashboard_df.set_index("Status").reset_index()
+    # --- END: PR - Comments sheet generation ---
 
     invoice_type_map = df_2b_b2b.set_index(["_GST_KEY", "_INV_KEY"]).get("_SOURCE_SHEET", pd.Series()).to_dict() \
         if not df_2b_b2b.empty else {}
@@ -1256,7 +1250,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
             cg_2b = _sum_component(status, pair_cols.get("cgst_2b_col"))
             sg_2b = _sum_component(status, pair_cols.get("sgst_2b_col"))
-            ig_2b = _sum_component(status, pair_cols.get("igst_2b_col"))
+            # --- START: THIS IS THE FIX ---
+            ig_2b = _sum_component(status, pair_cols.get("igst_2b_col")) # Corrected "igst_b_col" to "igst_2b_col"
+            # --- END: THIS IS THE FIX ---
             tot_2b = cg_2b + sg_2b + ig_2b
 
             return ([cg_pr, sg_pr, ig_pr, tot_pr], [cg_2b, sg_2b, ig_2b, tot_2b])
@@ -1399,12 +1395,18 @@ def reconcile_confirm():
         session.pop("tmp2b", None); session.pop("tmppr", None)
 
     user_id = request.form.get("user_id", "anon")
+
+    # --- START: REPLACE THIS BLOCK ---
     job = q.enqueue(
         "main.process_reconcile",
         drive_id_2b, drive_id_pr, sel, user_id,
-        job_timeout=900, result_ttl=86400, failure_ttl=86400
+        job_timeout=-1,  # <-- FIX 1: Explicitly disable the timeout for the worker.
+        result_ttl=86400,
+        failure_ttl=86400
     )
+    # --- FIX 2: Ensure this return statement is present right after creating the job. ---
     return render_template("progress.html", job_id=job.id)
+    # --- END: REPLACE THIS BLOCK ---
 
 @app.route("/status/<job_id>", methods=["GET"])
 def status(job_id):

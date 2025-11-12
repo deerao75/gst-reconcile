@@ -20,6 +20,11 @@ from rq.job import Job
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+# NEW: add these imports near the other top-level imports in main.py
+import sqlalchemy as sa
+from sqlalchemy import inspect
+from datetime import date, timedelta
+
 
 # -------------------- Flask & App Config --------------------
 app = Flask(__name__)
@@ -88,13 +93,24 @@ def clear_stale_session_if_user_missing():
             # remove any stale session cookies / keys
             session.clear()
 
+# REPLACE your existing create_tables_once() with this version
+_tables_created = False
+_tables_lock = threading.Lock()
+
 @app.before_request
 def create_tables_once():
     global _tables_created
     if not _tables_created:
         with _tables_lock:
             if not _tables_created:
+                # Create missing tables (will not alter existing ones)
                 db.create_all()
+                # Try to ensure the new column exists in the users table
+                try:
+                    ensure_user_schema()
+                except Exception:
+                    # ensure_user_schema logs internally
+                    pass
                 _tables_created = True
 
 # ------- NEW: Redis Queue (for background jobs) -------
@@ -887,65 +903,126 @@ def index():
 # REPLACEMENT FUNCTION: Protects the reconciliation module.
 @app.route("/verify", methods=["POST"])
 def verify_columns():
+    """
+    Handle uploaded GSTR-2B and Purchase Register files, detect columns and render
+    the verification page. Defensive about missing subscription fields to avoid
+    AttributeError when deployed DB schema is out-of-sync.
+    """
     # --- Access Control Check ---
     if not session.get('logged_in'):
         flash('Please log in to access this feature.', 'warning')
         return redirect(url_for('login'))
 
-    user = User.query.filter_by(email=session['email']).first()
+    user = User.query.filter_by(email=session.get('email')).first()
 
-    is_active_subscriber = user and user.subscribed and user.subscription_expiry_date and user.subscription_expiry_date >= date.today()
+    # Defensive access of attributes (avoids AttributeError if DB column missing)
+    subscribed = getattr(user, "subscribed", False) if user else False
+    expiry = getattr(user, "subscription_expiry_date", None) if user else None
+
+    try:
+        is_active_subscriber = bool(user and subscribed and expiry and expiry >= date.today())
+    except Exception:
+        # expiry may not be a date object (or may be a string) — treat as not active.
+        is_active_subscriber = False
 
     if not is_active_subscriber:
         flash('Your subscription has expired. Please choose a plan to continue.', 'danger')
         return redirect(url_for('subscribe'))
     # --- End of Access Control ---
 
+    # Get uploaded files and format choice
     file_2b = request.files.get("gstr2b")
     file_pr = request.files.get("purchase_register")
-    gstr2b_format = request.form.get("gstr2b_format", "portal")
+    gstr2b_format = (request.form.get("gstr2b_format") or "portal").strip()
 
     if not file_2b or not file_pr:
-        flash("Please upload both files: GSTR-2B and Purchase Register.")
+        flash("Please upload both files: GSTR-2B and Purchase Register.", "warning")
         return redirect(url_for("index"))
 
-    # ... (The rest of the function remains the same as before)
+    # Save uploaded files to temporary files and persist paths in session
     tmp2b = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
     tmppr = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    file_2b.stream.seek(0); tmp2b.write(file_2b.read()); tmp2b.close()
-    file_pr.stream.seek(0); tmppr.write(file_pr.read()); tmppr.close()
+    try:
+        file_2b.stream.seek(0)
+        tmp2b.write(file_2b.read())
+        tmp2b.close()
+        file_pr.stream.seek(0)
+        tmppr.write(file_pr.read())
+        tmppr.close()
+    except Exception as e:
+        try:
+            tmp2b.close()
+            tmppr.close()
+        except Exception:
+            pass
+        try:
+            os.remove(tmp2b.name)
+        except Exception:
+            pass
+        try:
+            os.remove(tmppr.name)
+        except Exception:
+            pass
+        flash("Failed to read uploaded files. Please try again.", "danger")
+        return redirect(url_for("index"))
+
+    # Store temp file paths + chosen format in session for the next step (confirm/reconcile)
     session["tmp2b"] = tmp2b.name
     session["tmppr"] = tmppr.name
     session["gstr2b_format"] = gstr2b_format
 
+    # Inspect sheets in GSTR-2B file
+    try:
+        with pd.ExcelFile(tmp2b.name) as xls:
+            sheet_names = xls.sheet_names
+    except Exception as e:
+        flash("Failed to read the GSTR-2B file. Ensure it is a valid Excel file.", "danger")
+        # Cleanup temp files and session on error
+        try:
+            os.remove(tmp2b.name); os.remove(tmppr.name)
+        except Exception:
+            pass
+        session.pop("tmp2b", None); session.pop("tmppr", None); session.pop("gstr2b_format", None)
+        return redirect(url_for("index"))
+
     wanted_sheets = ["B2B", "B2B-CDNR"]
-    with pd.ExcelFile(tmp2b.name) as xls:
-        sheet_names = xls.sheet_names
     present_sheets = [sn for sn in wanted_sheets if sn in sheet_names]
 
     if "B2B" not in present_sheets:
-        flash("Could not find a 'B2B' sheet in the GSTR-2B file.")
+        flash("Could not find a 'B2B' sheet in the GSTR-2B file.", "danger")
         return redirect(url_for("index"))
 
+    # Header rows depend on portal vs flat format
     header_rows = [4, 5] if gstr2b_format == "portal" else 0
 
+    # Read and normalize B2B and CDNR sheets (if present)
     df_b2b = None
     df_cdnr = None
-    if "B2B" in present_sheets:
-        df_b2b = pd.read_excel(tmp2b.name, sheet_name="B2B", header=header_rows, engine="openpyxl", dtype=str)
-        df_b2b = df_b2b.dropna(how="all")
-        df_b2b.columns = flatten_columns(df_b2b.columns)
-        df_b2b, _ = normalize_columns(df_b2b)
+    try:
+        if "B2B" in present_sheets:
+            df_b2b = pd.read_excel(tmp2b.name, sheet_name="B2B", header=header_rows, engine="openpyxl", dtype=str)
+            df_b2b = df_b2b.dropna(how="all")
+            df_b2b.columns = flatten_columns(df_b2b.columns)
+            df_b2b, _ = normalize_columns(df_b2b)
 
-    if "B2B-CDNR" in present_sheets:
-        df_cdnr = pd.read_excel(tmp2b.name, sheet_name="B2B-CDNR", header=header_rows, engine="openpyxl", dtype=str)
-        df_cdnr = df_cdnr.dropna(how="all")
-        df_cdnr.columns = flatten_columns(df_cdnr.columns)
-        df_cdnr, _ = normalize_columns(df_cdnr)
+        if "B2B-CDNR" in present_sheets:
+            df_cdnr = pd.read_excel(tmp2b.name, sheet_name="B2B-CDNR", header=header_rows, engine="openpyxl", dtype=str)
+            df_cdnr = df_cdnr.dropna(how="all")
+            df_cdnr.columns = flatten_columns(df_cdnr.columns)
+            df_cdnr, _ = normalize_columns(df_cdnr)
+    except Exception as e:
+        flash("Failed to parse sheets from the GSTR-2B file. Ensure the file has expected structure.", "danger")
+        return redirect(url_for("index"))
 
-    df_pr_raw = pd.read_excel(tmppr.name, engine="openpyxl", dtype=str)
-    df_pr_raw, _ = normalize_columns(df_pr_raw)
+    # Read and normalize Purchase Register
+    try:
+        df_pr_raw = pd.read_excel(tmppr.name, engine="openpyxl", dtype=str)
+        df_pr_raw, _ = normalize_columns(df_pr_raw)
+    except Exception as e:
+        flash("Failed to read the Purchase Register file. Ensure it is a valid Excel file.", "danger")
+        return redirect(url_for("index"))
 
+    # Heuristic column picks for B2B (invoice-based)
     inv_2b_b2b = _pick_column(df_b2b, INVOICE_CANDIDATES_2B) if df_b2b is not None else None
     gst_2b_b2b = _pick_column(df_b2b, GSTIN_CANDIDATES_2B) if df_b2b is not None else None
     date_2b_b2b = _pick_column(df_b2b, DATE_CANDIDATES_2B) if df_b2b is not None else None
@@ -953,6 +1030,7 @@ def verify_columns():
     sgst_2b_b2b = _pick_column(df_b2b, SGST_CANDIDATES_2B) if df_b2b is not None else None
     igst_2b_b2b = _pick_column(df_b2b, IGST_CANDIDATES_2B) if df_b2b is not None else None
 
+    # Heuristic column picks for CDNR (note-based)
     note_2b_cdnr = _pick_column(df_cdnr, NOTE_NO_CANDIDATES_2B) if df_cdnr is not None else None
     notedate_2b_cdnr = _pick_column(df_cdnr, NOTE_DATE_CANDIDATES_2B) if df_cdnr is not None else None
     note_type_2b_cdnr = _pick_column(df_cdnr, NOTE_TYPE_CANDIDATES_2B) if df_cdnr is not None else None
@@ -961,6 +1039,7 @@ def verify_columns():
     sgst_2b_cdnr = _pick_column(df_cdnr, SGST_CANDIDATES_2B) if df_cdnr is not None else None
     igst_2b_cdnr = _pick_column(df_cdnr, IGST_CANDIDATES_2B) if df_cdnr is not None else None
 
+    # Heuristic column picks for Purchase Register
     inv_pr = _pick_column(df_pr_raw, INVOICE_CANDIDATES_PR, avoid_terms=AVOID_DOC_LIKE_FOR_PR,
                           extra_penalties=["gstin", "company", "recipient"])
     gst_pr = _pick_column(df_pr_raw, GSTIN_CANDIDATES_PR, extra_penalties=AVOID_RECIPIENT_GSTIN_FOR_PR)
@@ -969,17 +1048,21 @@ def verify_columns():
     sgst_pr = _pick_column(df_pr_raw, SGST_CANDIDATES_PR)
     igst_pr = _pick_column(df_pr_raw, IGST_CANDIDATES_PR)
 
+    # Value-based fallbacks if heuristics fail
     if not gst_pr or gst_pr not in df_pr_raw.columns:
         guess = pick_gstin_by_values(df_pr_raw, prefer_supplier=True)
-        if guess: gst_pr = guess
+        if guess:
+            gst_pr = guess
     if not inv_pr or inv_pr not in df_pr_raw.columns:
         guess = pick_invoice_by_values(df_pr_raw)
-        if guess: inv_pr = guess
+        if guess:
+            inv_pr = guess
 
     cols_b2b = sorted(df_b2b.columns) if df_b2b is not None else []
     cols_cdnr = sorted(df_cdnr.columns) if df_cdnr is not None else []
     cols_pr = sorted(df_pr_raw.columns)
 
+    # Render the verify page with detected columns and choices prefilled
     return render_template(
         "verify.html",
         cols_pr=cols_pr,
@@ -995,6 +1078,32 @@ def verify_columns():
     )
 
 # ---------- helpers ----------
+
+# NEW: add this helper function (place it near your other DB helpers, before create_tables_once)
+def ensure_user_schema():
+    """
+    Ensure the User table has the subscription_expiry_date column.
+    Safe, simple ALTER TABLE to add the DATE column if missing.
+    Works for sqlite and postgres; logs and continues if it cannot alter.
+    """
+    try:
+        engine = db.get_engine()
+        inspector = inspect(engine)
+        table_name = User.__table__.name
+        # get existing column names
+        cols = [c['name'] for c in inspector.get_columns(table_name)]
+        if 'subscription_expiry_date' in cols:
+            return  # already present
+
+        dialect = engine.dialect.name
+        sql = f'ALTER TABLE "{table_name}" ADD COLUMN subscription_expiry_date DATE'
+        # Execute ALTER for sqlite/postgres or generic
+        engine.execute(sa.text(sql))
+        app.logger.info("Added subscription_expiry_date column to %s (dialect=%s)", table_name, dialect)
+    except Exception as e:
+        # Log but don't crash the app; verify endpoint is made defensive separately.
+        app.logger.exception("Could not ensure User schema: %s", e)
+
 def _pick_best_note_col(df: pd.DataFrame, primary: Optional[str]) -> Optional[str]:
     if df is None or df.empty:
         return primary
@@ -2161,6 +2270,8 @@ def edit_user(user_id):
 def delete_user(user_id):
     # Delegate to the existing admin_delete_user implementation
     return admin_delete_user(user_id)
+
+
 
 if __name__ == "__main__":
     app.run(debug=True)

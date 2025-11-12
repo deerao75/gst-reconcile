@@ -4,20 +4,14 @@
   <h1 style="text-align: center; color: #ff9500;">Acer Nova</h1>
   <h2 style="text-align: center;">Upload Files for Reconciliation</h2>
   <p class="muted" style="text-align: justify;">
-  Upload the two Excel files. GSTR 2B downloaded from the GST Portal
-  [2B sheet must have <b>B2B</b> and/or <b>B2B-CDNR</b> with headers on rows <b>5 &amp; 6]</b>
-  and your Purchase Register.
-  The program will automatically identify the columns to be mapped.
-  After upload click the reconcile and download button,
-  you will see a review step to confirm the column headings used for mapping.
+  Upload your GSTR-2B and Purchase Register. For GSTR-2B, please specify if it's the original file from the GST Portal or a custom file with headers in the first row. The program will automatically identify and suggest columns for mapping. After uploading, click the button to proceed to the verification step.
   </p>
-
 
   <form class="upload-form" action="{{ url_for('verify_columns') }}" method="post" enctype="multipart/form-data">
     <div class="upload-grid">
       <div class="upload-box">
         <h3>GSTR-2B</h3>
-        <p class="hint">Reads <b>B2B</b> &amp; <b>B2B-CDNR</b>; rows 5–6 as header.</p>
+        <p class="hint">Reads <b>B2B</b> &amp; <b>B2B-CDNR</b> sheets.</p>
         <label class="filebtn">
           Choose File
           <input id="file2b" type="file" name="gstr2b" accept=".xls,.xlsx" required>
@@ -27,7 +21,7 @@
 
       <div class="upload-box">
         <h3>Purchase Register</h3>
-        <p class="hint">.xlsx or .xls</p>
+        <p class="hint">Requires .xlsx or .xls file.</p>
         <label class="filebtn">
           Choose File
           <input id="filepr" type="file" name="purchase_register" accept=".xls,.xlsx" required>
@@ -36,11 +30,25 @@
       </div>
     </div>
 
-    <div class="actions">
-      <button type="submit" class="cta">Consolidate, Reconcile &amp; Download</button>
+    <div class="format-selector-box">
+        <h4>GSTR-2B Format</h4>
+        <p class="hint">Select the header format of your GSTR-2B file.</p>
+        <div class="radio-group">
+            <label>
+                <input type="radio" name="gstr2b_format" value="portal" checked>
+                Portal Format (Headers on Rows 5 & 6)
+            </label>
+            <label>
+                <input type="radio" name="gstr2b_format" value="custom">
+                Custom Format (Headers on Row 1)
+            </label>
+        </div>
     </div>
 
-    <!-- Mapping remark details -->
+    <div class="actions">
+      <button type="submit" class="cta">Verify and Reconcile</button>
+    </div>
+
     <div class="remark-box">
       <h3>Mapping Remarks Explained</h3>
       <ul>
@@ -53,12 +61,72 @@
 </section>
 
 <style>
+/* Original styles for upload boxes */
+.upload-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.upload-box {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 12px;
+  padding: 1.2rem 1.5rem;
+  text-align: center;
+}
 .upload-confirm {
   margin: .4rem 0 0;
+  min-height: 1.2em;
   font-size: .92rem;
-  color: #fff; /* changed from #333 to white */
+  color: #fff;
 }
 
+/* Styles for the format selector box */
+.format-selector-box {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 1rem 1.5rem;
+  margin-bottom: 2rem;
+  text-align: center;
+}
+.format-selector-box h4 {
+  margin: 0 0 0.25rem 0;
+  font-size: 1.1rem;
+  color: #fff;
+}
+.format-selector-box .hint {
+  margin-top: 0;
+  font-size: 0.9rem;
+}
+.format-selector-box .radio-group {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+.format-selector-box .radio-group label {
+    display: block;
+    padding: 0.8rem 1.2rem;
+    background: rgba(0,0,0,0.25);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-size: 0.9rem;
+    /* START: THIS IS THE FIX */
+    color: #fff;
+    /* END: THIS IS THE FIX */
+}
+.format-selector-box .radio-group label:hover {
+    background: rgba(0,0,0,0.4);
+}
+.format-selector-box .radio-group input[type="radio"] {
+    margin-right: 0.5rem;
+    vertical-align: middle;
+}
+
+/* Original remark box styles */
 .remark-box {
   margin-top: 2rem;
   padding: 1rem 1.2rem;
@@ -101,14 +169,14 @@
   const n2b = document.getElementById('file2bName');
   const npr = document.getElementById('fileprName');
 
-  function showName(input, labelEl, label) {
+  function showName(input, labelEl) {
     if (input.files && input.files.length) {
-      labelEl.textContent = `${label}: ${input.files[0].name}`;
+      labelEl.textContent = `${input.files[0].name}`;
     } else {
       labelEl.textContent = '';
     }
   }
-  f2b.addEventListener('change', () => showName(f2b, n2b, 'GSTR-2B file selected'));
-  fpr.addEventListener('change', () => showName(fpr, npr, 'Purchase Register file selected'));
+  f2b.addEventListener('change', () => showName(f2b, n2b));
+  fpr.addEventListener('change', () => showName(fpr, npr));
 </script>
 {% endblock %}

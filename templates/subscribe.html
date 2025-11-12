@@ -1,62 +1,37 @@
 {% extends "base.html" %}
 {% block content %}
 <style>
-  /* Container spacing so main content sits below top bar */
   .subscribe-container {
     display: flex;
     justify-content: center;
-    padding: 64px 16px 48px; /* space from top bar + breathing room */
+    padding: 64px 16px 48px;
     box-sizing: border-box;
   }
-
   .subscription-plans {
     display: flex;
     gap: 28px;
     align-items: stretch;
     justify-content: center;
     flex-wrap: wrap;
-    max-width: 980px;
+    max-width: 1080px; /* Increased max-width for 3 cards */
     width: 100%;
   }
-
   .plan {
     background: #ffffff;
     border-radius: 10px;
     box-shadow: 0 6px 18px rgba(0,0,0,0.08);
     padding: 28px;
-    width: 340px;
+    width: 320px; /* Adjusted width */
     text-align: center;
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
-
-  .plan h3 {
-    margin: 0;
-    font-size: 1.2rem;
-    color: #111827;
-  }
-
-  .price {
-    font-size: 1.6rem;
-    font-weight: 700;
-    color: #0b6b4a; /* pleasant green */
-  }
-
-  .billing {
-    color: #6b7280;
-    font-size: 0.95rem;
-  }
-
-  .plan p {
-    margin: 0;
-    color: #4b5563;
-  }
-
-  .plan form {
-    margin-top: auto;
-  }
-
+  .plan h3 { margin: 0; font-size: 1.2rem; color: #111827; }
+  .price { font-size: 1.6rem; font-weight: 700; color: #0b6b4a; }
+  .billing { color: #6b7280; font-size: 0.95rem; }
+  .plan p { margin: 0; color: #4b5563; }
+  .plan form { margin-top: auto; }
   .plan button {
     background: #0b6b4a;
     color: white;
@@ -66,39 +41,57 @@
     font-weight: 600;
     cursor: pointer;
     width: 100%;
+    transition: background-color 0.2s;
   }
+  .plan button:hover { background: #08563b; }
 
-  .plan button:hover {
-    background: #08563b;
+  /* --- START: THIS IS THE FIX --- */
+  /* Style for the free trial button */
+  .plan.free-trial button {
+      background-color: #3b82f6; /* A friendly blue */
   }
+  .plan.free-trial button:hover {
+      background-color: #2563eb;
+  }
+  .plan.free-trial .price {
+      color: #3b82f6;
+  }
+  /* --- END: THIS IS THE FIX --- */
 
-  /* Responsive */
+  @media (max-width: 1024px) {
+    .plan { width: 45%; }
+  }
   @media (max-width: 720px) {
     .subscription-plans { gap: 18px; }
     .plan { width: 100%; padding: 20px; }
     .subscribe-container { padding-top: 42px; }
   }
-
-  .subscribe-header {
-    text-align: center;
-    margin-top: 8px;
-    margin-bottom: 12px;
-  }
-  .subscribe-note {
-    text-align: center;
-    color: #6b7280;
-    margin-bottom: 18px;
-  }
+  .subscribe-header { text-align: center; margin-top: 8px; margin-bottom: 12px; }
+  .subscribe-note { text-align: center; color: #6b7280; margin-bottom: 18px; }
 </style>
 
 <div class="subscribe-container">
-  <div style="width:100%;max-width:980px;">
+  <div style="width:100%;max-width:1080px;">
     <div class="subscribe-header">
       <h2>Choose Your Plan</h2>
       <div class="subscribe-note">All prices are inclusive of taxes where applicable. Secure payments via PayU.</div>
     </div>
 
     <div class="subscription-plans" role="list">
+
+      <!-- START: THIS IS THE FIX - Free Trial Plan -->
+      <div class="plan free-trial" role="listitem" aria-label="Free Trial Plan">
+        <h3>Free Trial</h3>
+        <div class="price">FREE</div>
+        <div class="billing">7 days of full access</div>
+        <p>Explore all features for one week. No credit card required. Limit one per user.</p>
+
+        <form method="POST" action="{{ url_for('start_trial') }}">
+          <button type="submit">Start Free Trial</button>
+        </form>
+      </div>
+      <!-- END: THIS IS THE FIX -->
+
       <div class="plan" role="listitem" aria-label="Half-Yearly Plan">
         <h3>Half-Yearly</h3>
         <div class="price">INR 2,000 / month</div>

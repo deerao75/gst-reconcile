@@ -128,17 +128,15 @@ def download_from_drive(file_id: str, local_path: str):
 INVOICE_CANDIDATES_2B = [
     "invoice details invoice number", "invoice number", "invoice no", "inv no", "inv number",
     "invoice", "invoice details inv no", "invoice details document number",
-    "note no", "debit note no", "credit note no", "note number"
+    "note no", "debit note no", "credit note no", "note number", "doc number", "doc no", "document number"
 ]
 # Generic GSTIN (B2B)
 GSTIN_CANDIDATES_2B = [
-    "gstin of supplier", "supplier information gstin of supplier",
-    "gstin", "gst no", "gst number", "gstn"
+    "gstin of supplier", "gstin", "gst no", "gst number", "gstn", "supplier gstin"
 ]
 # Stronger GSTIN for CDNR (explicit 2B wording first)
 GSTIN_CANDIDATES_CDNR = [
-    "gstin of supplier 2b", "gstin of supplier", "supplier information gstin of supplier",
-    "gstin", "gst no", "gst number", "gstn"
+    "gstin of supplier", "gstin", "gst no", "gst number", "gstin number"
 ]
 DATE_CANDIDATES_2B = [
     "invoice details invoice date", "invoice date", "doc date", "document date", "date"
@@ -154,6 +152,10 @@ NOTE_TYPE_CANDIDATES_2B = [
     "note type", "credit/debit note", "cr/dr", "type of note", "cd note type", "cr/dr note"
 ]
 
+INV_TYPE_CANDIDATES = [
+    "document type", "doc type", "invoice type", "inv type", "type"
+]
+
 CGST_CANDIDATES_2B = ["cgst", "central tax", "central tax amount", "cgst amount"]
 SGST_CANDIDATES_2B = ["sgst", "state tax", "state/ut tax", "state tax amount", "sgst amount", "utgst", "utgst amount"]
 IGST_CANDIDATES_2B = ["igst", "integrated tax", "integrated tax amount", "igst amount"]
@@ -166,7 +168,7 @@ CESS_CANDIDATES_2B = ["cess", "cess amount"]
 INVOICE_CANDIDATES_PR = [
     "vendor inv no", "vendor invoice no", "vendor invoice number",
     "supplier inv no", "supplier invoice no", "supplier invoice number",
-    "party invoice no", "party inv no", "bill no", "bill number",
+    "party invoice no", "party inv no", "bill no", "bill number", "doc no", "doc number", "document number",
     # generic fallbacks
     "invoice number", "invoice no", "inv no", "inv number", "invoice",
     # allow common accounting label
@@ -174,7 +176,7 @@ INVOICE_CANDIDATES_PR = [
 ]
 GSTIN_CANDIDATES_PR = [
     # strong preference for supplier/vendor
-    "supplier gstin", "vendor gstin", "party gstin",
+    "supplier gstin", "vendor gstin", "party gstin", "gstin of supplier",
     # fallbacks
     "gstin", "gst no", "gst number", "gstn"
 ]
@@ -190,8 +192,8 @@ INVOICE_VALUE_CANDIDATES_PR = ["invoice value", "total invoice value", "value of
 CESS_CANDIDATES_PR = ["cess", "cess amount"]
 
 # Avoid confusing PR invoice with doc/voucher and PR GSTIN with recipient/company
-AVOID_DOC_LIKE_FOR_PR = ["document no", "document number", "doc number", "voucher no", "voucher number"]
-AVOID_RECIPIENT_GSTIN_FOR_PR = ["company gstin", "our gstin", "recipient gstin", "customer gstin", "buyer gstin"]
+AVOID_DOC_LIKE_FOR_PR = ["voucher no", "voucher number"]
+AVOID_RECIPIENT_GSTIN_FOR_PR = ["company gstin", "our gstin", "recipient gstin", "buyer gstin"]
 
 # keep-only extras
 VENDOR_NAME_PR_CANDIDATES = [
@@ -273,7 +275,12 @@ def flatten_columns(cols) -> List[str]:
                 parts.append(s)
             out.append(" ".join(parts))
         return out
-    return [str(c).replace("\xa0", " ").strip()]
+
+    # --- START: THIS IS THE FIX ---
+    # When it's not a MultiIndex, it's a regular Index.
+    # We iterate through it directly and clean up each column name.
+    return [str(c).replace("\xa0", " ").strip() for c in cols]
+    # --- END: THIS IS THE FIX ---
 
 def _find_optional_col(df: pd.DataFrame, pools: List[List[str]]) -> Optional[str]:
     for cands in pools:
@@ -460,10 +467,13 @@ def consolidate_by_key(
     gstin_col: str,
     inv_col: str,
     date_col: Optional[str],
-    numeric_cols: List[str]
+    numeric_cols: List[str],
+    text_cols: Optional[List[str]] = None # <-- NEW: Accept text columns to preserve
 ) -> pd.DataFrame:
     if df.empty:
         return df.copy()
+
+    text_cols = text_cols or []
     work = df.copy()
     work["_GST_KEY"] = work[gstin_col].map(clean_gstin)
     work[inv_col] = work[inv_col].map(as_text)
@@ -481,11 +491,19 @@ def consolidate_by_key(
     agg_dict = {}
     for c in numeric_cols:
         if c in work.columns: agg_dict[c] = "sum"
+
+    # --- START: THIS IS THE FIX ---
+    # Explicitly tell the function to keep the first value of any text columns.
+    for c in text_cols:
+        if c in work.columns: agg_dict[c] = "first"
+    # --- END: THIS IS THE FIX ---
+
     agg_dict["_DATE_TMP"] = "min"
     agg_dict[gstin_col] = "first"
     agg_dict[inv_col] = "first"
 
-    protected = set(["_GST_KEY", "_INV_KEY", "_DATE_TMP"] + [gstin_col, inv_col] + numeric_cols)
+    # Add text_cols to the protected set to ensure they are not processed by other logic
+    protected = set(["_GST_KEY", "_INV_KEY", "_DATE_TMP"] + [gstin_col, inv_col] + numeric_cols + text_cols)
     for c in work.columns:
         if c not in protected and c not in agg_dict:
             agg_dict[c] = "first"
@@ -570,12 +588,11 @@ def reconcile(
     return out
 
 # -------------------- Pairwise combined output --------------------
-# main.py
-
 def build_pairwise_recon(
     df_pr: pd.DataFrame, df_2b: pd.DataFrame,
     inv_pr: str, gst_pr: str, date_pr: str, cgst_pr: str, sgst_pr: str, igst_pr: str,
     inv_2b: str, gst_2b: str, date_2b: str, cgst_2b: str, sgst_2b: str, igst_2b: str,
+    inv_type_pr: Optional[str] = None, inv_type_2b: Optional[str] = None
 ):
     pr = df_pr.copy()
     b2 = df_2b.copy()
@@ -616,9 +633,11 @@ def build_pairwise_recon(
     sgst_2b_col = f"{sgst_2b}_2B" if sgst_2b else None
     igst_pr_col = f"{igst_pr}_PR" if igst_pr else None
     igst_2b_col = f"{igst_2b}_2B" if igst_2b else None
+    inv_type_pr_col = f"{inv_type_pr}_PR" if inv_type_pr else None
+    inv_type_2b_col = f"{inv_type_2b}_2B" if inv_type_2b else None
 
     mapping, remarks, reason = [], [], []
-    for _, r in merged.iterrows():
+    for idx, r in merged.iterrows():
         pr_inv_val = as_text(r.get(inv_pr_col, "")) if inv_pr_col in merged.columns else ""
         pr_gst_val = clean_gstin(r.get(gst_pr_col, "")) if gst_pr_col in merged.columns else ""
         b2_inv_val = as_text(r.get(inv_2b_col, "")) if inv_2b_col in merged.columns else ""
@@ -626,9 +645,14 @@ def build_pairwise_recon(
 
         pr_present = bool(pr_inv_val) or bool(pr_gst_val)
         b2_present = bool(b2_inv_val) or bool(b2_gst_val)
-        if pr_present and not b2_present:
+
+        # This check is now robust and happens before mismatch calculation
+        is_pr_only = pr_present and not b2_present
+        is_2b_only = b2_present and not pr_present
+
+        if is_pr_only:
             mapping.append("Not Matched"); remarks.append("missing in 2B"); reason.append(""); continue
-        if b2_present and not pr_present:
+        if is_2b_only:
             mapping.append("Not Matched"); remarks.append("missing in PR"); reason.append(""); continue
 
         mismatches = []
@@ -662,15 +686,40 @@ def build_pairwise_recon(
             mask_fix = mask_fix & pr_orig_present.reindex(out.index).fillna(False)
         out.loc[mask_fix, inv_pr_col] = out.loc[mask_fix, "_INV_KEY"]
 
-    # --- FIX: Targeted correction for CDNR GSTINs in the final output ---
-    # Find the column that indicates the source sheet (B2B or B2B-CDNR) for 2B data.
-    source_sheet_col = "_SOURCE_SHEET_2B"
-    if source_sheet_col in out.columns and gst_2b_col in out.columns:
-        # Identify rows that came from the B2B-CDNR sheet.
-        cdnr_mask = (out[source_sheet_col] == "B2B-CDNR")
-        # For those specific rows, overwrite the potentially incorrect GSTIN with the correct one from `_GST_KEY`.
+    source_sheet_col_2b = "_SOURCE_SHEET_2B"
+    if source_sheet_col_2b in out.columns and gst_2b_col in out.columns:
+        cdnr_mask = (out[source_sheet_col_2b] == "B2B-CDNR")
         out.loc[cdnr_mask, gst_2b_col] = out.loc[cdnr_mask, "_GST_KEY"]
-    # --- End of FIX ---
+
+    # --- START: THIS IS THE CORRECTED LOGIC ---
+    def get_final_type(row):
+        # Priority 1: Use value from Purchase Register if available.
+        pr_type = as_text(row.get(inv_type_pr_col, '')) if inv_type_pr_col else ''
+        if pr_type:
+            return pr_type
+
+        # Priority 2: Use value from GSTR-2B if available.
+        b2_type = as_text(row.get(inv_type_2b_col, '')) if inv_type_2b_col else ''
+        if b2_type:
+            return b2_type
+
+        # Priority 3: Fallback based on GSTR-2B source sheet and note type.
+        note_type = row.get("_NOTE_TYPE_2B", "")
+        if note_type == "credit": return "Credit Note"
+        if note_type == "debit": return "Debit Note"
+
+        source_sheet = row.get("_SOURCE_SHEET_2B", "")
+        if source_sheet == "B2B": return "Invoice"
+
+        # Final fallback for items ONLY in Purchase Register (where 2B columns are NaN)
+        # If we got this far and it's not a 2B-only item, it must be an invoice from PR.
+        if pd.notna(row.get(inv_pr_col)):
+             return "Invoice"
+
+        return "" # Default to empty string if no type can be determined
+
+    out["Invoice Type"] = out.apply(get_final_type, axis=1)
+    # --- END: THIS IS THE CORRECTED LOGIC ---
 
     def pick_name_col(columns, candidates):
         cnorm = [_norm(c) for c in candidates]
@@ -736,10 +785,13 @@ def build_pairwise_recon(
     ]
     pair_cols = [c for c in pair_cols if c and c in out.columns]
 
-    keep_extra = [c for c in [gstr1_status_2b] if c and c in out.columns]
+    keep_extra = [c for c in [gstr1_status_2b, "Invoice Type"] if c and c in out.columns]
 
     front = ["_GST_KEY", "_INV_KEY", "Mapping", "Remarks", "Reason", "Vendor Name"]
-    final_cols = front + pair_cols + keep_extra
+    final_cols = front + keep_extra + pair_cols
+
+    final_cols = [c for c in final_cols if c in out.columns]
+
     out = out[final_cols]
 
     two_b_month_series = ""
@@ -752,7 +804,6 @@ def build_pairwise_recon(
         "cgst_2b_col": cgst_2b_col, "sgst_2b_col": sgst_2b_col, "igst_2b_col": igst_2b_col,
         "gstr1_status_2b_col": gstr1_status_2b
     }
-
 
 # -------------------- Dashboard --------------------
 def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
@@ -816,20 +867,39 @@ def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> p
 def index():
     return render_template("index.html")
 
+# REPLACEMENT FUNCTION: Protects the reconciliation module.
 @app.route("/verify", methods=["POST"])
 def verify_columns():
+    # --- Access Control Check ---
+    if not session.get('logged_in'):
+        flash('Please log in to access this feature.', 'warning')
+        return redirect(url_for('login'))
+
+    user = User.query.filter_by(email=session['email']).first()
+
+    is_active_subscriber = user and user.subscribed and user.subscription_expiry_date and user.subscription_expiry_date >= date.today()
+
+    if not is_active_subscriber:
+        flash('Your subscription has expired. Please choose a plan to continue.', 'danger')
+        return redirect(url_for('subscribe'))
+    # --- End of Access Control ---
+
     file_2b = request.files.get("gstr2b")
     file_pr = request.files.get("purchase_register")
+    gstr2b_format = request.form.get("gstr2b_format", "portal")
+
     if not file_2b or not file_pr:
         flash("Please upload both files: GSTR-2B and Purchase Register.")
         return redirect(url_for("index"))
 
+    # ... (The rest of the function remains the same as before)
     tmp2b = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
     tmppr = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
     file_2b.stream.seek(0); tmp2b.write(file_2b.read()); tmp2b.close()
     file_pr.stream.seek(0); tmppr.write(file_pr.read()); tmppr.close()
     session["tmp2b"] = tmp2b.name
     session["tmppr"] = tmppr.name
+    session["gstr2b_format"] = gstr2b_format
 
     wanted_sheets = ["B2B", "B2B-CDNR"]
     with pd.ExcelFile(tmp2b.name) as xls:
@@ -840,27 +910,25 @@ def verify_columns():
         flash("Could not find a 'B2B' sheet in the GSTR-2B file.")
         return redirect(url_for("index"))
 
+    header_rows = [4, 5] if gstr2b_format == "portal" else 0
+
     df_b2b = None
     df_cdnr = None
     if "B2B" in present_sheets:
-        df_b2b = pd.read_excel(tmp2b.name, sheet_name="B2B", header=[4, 5], engine="openpyxl", dtype=str)
-        print("LOCAL B2B COLS:", df_b2b.columns.tolist()[:25])
+        df_b2b = pd.read_excel(tmp2b.name, sheet_name="B2B", header=header_rows, engine="openpyxl", dtype=str)
         df_b2b = df_b2b.dropna(how="all")
         df_b2b.columns = flatten_columns(df_b2b.columns)
         df_b2b, _ = normalize_columns(df_b2b)
 
     if "B2B-CDNR" in present_sheets:
-        df_cdnr = pd.read_excel(tmp2b.name, sheet_name="B2B-CDNR", header=[4, 5], engine="openpyxl", dtype=str)
-        print("LOCAL CDNR COLS:", df_cdnr.columns.tolist()[:25])
+        df_cdnr = pd.read_excel(tmp2b.name, sheet_name="B2B-CDNR", header=header_rows, engine="openpyxl", dtype=str)
         df_cdnr = df_cdnr.dropna(how="all")
         df_cdnr.columns = flatten_columns(df_cdnr.columns)
         df_cdnr, _ = normalize_columns(df_cdnr)
 
     df_pr_raw = pd.read_excel(tmppr.name, engine="openpyxl", dtype=str)
-    print("LOCAL PR COLS:", df_pr_raw.columns.tolist()[:25])
     df_pr_raw, _ = normalize_columns(df_pr_raw)
 
-    # ---- Detection for B2B (invoice-based) ----
     inv_2b_b2b = _pick_column(df_b2b, INVOICE_CANDIDATES_2B) if df_b2b is not None else None
     gst_2b_b2b = _pick_column(df_b2b, GSTIN_CANDIDATES_2B) if df_b2b is not None else None
     date_2b_b2b = _pick_column(df_b2b, DATE_CANDIDATES_2B) if df_b2b is not None else None
@@ -868,7 +936,6 @@ def verify_columns():
     sgst_2b_b2b = _pick_column(df_b2b, SGST_CANDIDATES_2B) if df_b2b is not None else None
     igst_2b_b2b = _pick_column(df_b2b, IGST_CANDIDATES_2B) if df_b2b is not None else None
 
-    # ---- Detection for CDNR (note-based) ----
     note_2b_cdnr = _pick_column(df_cdnr, NOTE_NO_CANDIDATES_2B) if df_cdnr is not None else None
     notedate_2b_cdnr = _pick_column(df_cdnr, NOTE_DATE_CANDIDATES_2B) if df_cdnr is not None else None
     note_type_2b_cdnr = _pick_column(df_cdnr, NOTE_TYPE_CANDIDATES_2B) if df_cdnr is not None else None
@@ -877,7 +944,6 @@ def verify_columns():
     sgst_2b_cdnr = _pick_column(df_cdnr, SGST_CANDIDATES_2B) if df_cdnr is not None else None
     igst_2b_cdnr = _pick_column(df_cdnr, IGST_CANDIDATES_2B) if df_cdnr is not None else None
 
-    # ---- Detection for PR ----
     inv_pr = _pick_column(df_pr_raw, INVOICE_CANDIDATES_PR, avoid_terms=AVOID_DOC_LIKE_FOR_PR,
                           extra_penalties=["gstin", "company", "recipient"])
     gst_pr = _pick_column(df_pr_raw, GSTIN_CANDIDATES_PR, extra_penalties=AVOID_RECIPIENT_GSTIN_FOR_PR)
@@ -899,14 +965,11 @@ def verify_columns():
 
     return render_template(
         "verify.html",
-        # PR
         cols_pr=cols_pr,
         inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr,
-        # B2B
         cols_2b_b2b=cols_b2b,
         inv_2b_b2b=inv_2b_b2b, gst_2b_b2b=gst_2b_b2b, date_2b_b2b=date_2b_b2b,
         cgst_2b_b2b=cgst_2b_b2b, sgst_2b_b2b=sgst_2b_b2b, igst_2b_b2b=igst_2b_b2b,
-        # CDNR
         cols_2b_cdnr=cols_cdnr,
         note_2b_cdnr=note_2b_cdnr, notedate_2b_cdnr=notedate_2b_cdnr, gst_2b_cdnr=gst_2b_cdnr,
         cgst_2b_cdnr=cgst_2b_cdnr, sgst_2b_cdnr=sgst_2b_cdnr, igst_2b_cdnr=igst_2b_cdnr,
@@ -954,7 +1017,7 @@ def _append_if_missing(target_list: List[str], candidates: List[Optional[str]]) 
 
 # main.py
 
-def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
+def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format: str,
                                  # B2B (invoice-based)
                                  inv_2b_b2b_sel: str, gst_2b_b2b_sel: str, date_2b_b2b_sel: str, cgst_2b_b2b_sel: str, sgst_2b_b2b_sel: str, igst_2b_b2b_sel: str,
                                  # CDNR (note-based)
@@ -969,8 +1032,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     if not has_b2b:
         raise ValueError("Could not find a 'B2B' sheet in the GSTR-2B file.")
 
+    header_rows = [4, 5] if gstr2b_format == "portal" else 0
+
     def load_sheet(name):
-        df = pd.read_excel(tmp2b_path, sheet_name=name, header=[4, 5])
+        df = pd.read_excel(tmp2b_path, sheet_name=name, header=header_rows)
         df = df.dropna(how="all")
         if df.empty:
             return df
@@ -1043,6 +1108,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     sgst_2b_cdnr = ensure_col(df_cdnr_raw, sgst_2b_cdnr_sel, SGST_CANDIDATES_2B)
     igst_2b_cdnr = ensure_col(df_cdnr_raw, igst_2b_cdnr_sel, IGST_CANDIDATES_2B)
 
+    inv_type_pr = ensure_col(df_pr_raw, "", INV_TYPE_CANDIDATES)
+    inv_type_2b_b2b = ensure_col(df_b2b_raw, "", INV_TYPE_CANDIDATES)
+    inv_type_2b_cdnr = ensure_col(df_cdnr_raw, "", INV_TYPE_CANDIDATES)
+
     def apply_signs(df, note_type_col: Optional[str]) -> pd.DataFrame:
         if df.empty:
             return df
@@ -1073,7 +1142,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
             df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
         return df
 
-    df_b2b_raw = apply_signs(df_b2b_raw, note_type_col=None)
+    df_b2b_raw = apply_signs(df_b2b_raw, note_type_col=note_type_2b)
     df_cdnr_raw = apply_signs(df_cdnr_raw, note_type_col=note_type_2b)
 
     gst_pr = match_provided(df_pr_raw, gst_pr_sel) or ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
@@ -1112,14 +1181,18 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     opt_pr = optional_numeric_list(df_pr_raw)
     _append_if_missing(opt_pr, [cgst_pr, sgst_pr, igst_pr])
 
+    # --- START: THIS IS THE FIX ---
+    # Pass the invoice type columns as 'text_cols' so they are preserved correctly.
     df_2b_b2b = consolidate_by_key(
         df=df_b2b_raw, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b,
-        date_col=date_2b_b2b, numeric_cols=opt_2b_b2b
+        date_col=date_2b_b2b, numeric_cols=opt_2b_b2b,
+        text_cols=[inv_type_2b_b2b]
     ) if (df_b2b_raw is not None and not df_b2b_raw.empty and inv_2b_b2b and gst_2b_b2b) else pd.DataFrame()
 
     df_2b_cdnr = consolidate_by_key(
         df=df_cdnr_raw, gstin_col=gst_2b_cdnr, inv_col=note_2b_cdnr,
-        date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr
+        date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr,
+        text_cols=[inv_type_2b_cdnr]
     ) if (df_cdnr_raw is not None and not df_cdnr_raw.empty and note_2b_cdnr and gst_2b_cdnr) else pd.DataFrame()
 
     if not df_2b_cdnr.empty:
@@ -1127,8 +1200,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
     df_pr = consolidate_by_key(
         df=df_pr_raw, gstin_col=gst_pr, inv_col=inv_pr,
-        date_col=date_pr, numeric_cols=opt_pr
+        date_col=date_pr, numeric_cols=opt_pr,
+        text_cols=[inv_type_pr]
     )
+    # --- END: THIS IS THE FIX ---
 
     def add_display_cols(df_, inv_col, date_col, source_tag):
         if df_.empty:
@@ -1157,11 +1232,12 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
     combined_df, pair_cols = build_pairwise_recon(
         df_pr=df_pr, df_2b=df_2b,
         inv_pr=inv_pr, gst_pr=gst_pr, date_pr=date_pr, cgst_pr=cgst_pr, sgst_pr=sgst_pr, igst_pr=igst_pr,
+        inv_type_pr=inv_type_pr,
         inv_2b="_INV_DISPLAY", gst_2b=(gst_2b_b2b or gst_2b_cdnr), date_2b="_DATE_DISPLAY",
-        cgst_2b=(cgst_2b_b2b or cgst_2b_cdnr), sgst_2b=(sgst_2b_b2b or sgst_2b_cdnr), igst_2b=(igst_2b_b2b or igst_2b_cdnr)
+        cgst_2b=(cgst_2b_b2b or cgst_2b_cdnr), sgst_2b=(sgst_2b_b2b or sgst_2b_cdnr), igst_2b=(igst_2b_b2b or igst_2b_cdnr),
+        inv_type_2b=(inv_type_2b_b2b or inv_type_2b_cdnr)
     )
 
-    # --- START: PR - Comments sheet generation ---
     recon_lookup = {}
     for _, row in combined_df.iterrows():
         key = (as_text(row.get("_GST_KEY", "")), as_text(row.get("_INV_KEY", "")))
@@ -1183,23 +1259,17 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
         pr_comments["Mapping"] = ""
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
-    # --- END: PR - Comments sheet generation ---
-
-    invoice_type_map = df_2b_b2b.set_index(["_GST_KEY", "_INV_KEY"]).get("_SOURCE_SHEET", pd.Series()).to_dict() \
-        if not df_2b_b2b.empty else {}
-    note_type_map = df_2b_cdnr.set_index(["_GST_KEY", "_INV_KEY"]).get("_NOTE_TYPE", pd.Series()).to_dict() \
-        if not df_2b_cdnr.empty else {}
-
-    combined_df["Invoice Type"] = combined_df.apply(
-        lambda r: invoice_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), ""), axis=1)
-    combined_df["Note Type"] = combined_df.apply(
-        lambda r: {"credit":"Credit Note","debit":"Debit Note"}.get(note_type_map.get((r.get("_GST_KEY"), r.get("_INV_KEY")), "").lower(), ""), axis=1)
 
     cols = list(combined_df.columns)
-    if "Invoice Type" in cols and "Note Type" in cols:
-        idx = cols.index("_INV_KEY") + 1
-        for c in ["Note Type", "Invoice Type"][::-1]:
-            cols.insert(idx, cols.pop(cols.index(c)))
+    if "Invoice Type" in cols:
+        if "_INV_KEY" in cols:
+            idx = cols.index("_INV_KEY") + 1
+        else:
+            idx = 5
+
+        if "Invoice Type" in cols:
+            cols.insert(idx, cols.pop(cols.index("Invoice Type")))
+
         combined_df = combined_df[cols]
 
     def _autosize_ws(ws, df, min_w=12, max_w=48):
@@ -1250,9 +1320,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str,
 
             cg_2b = _sum_component(status, pair_cols.get("cgst_2b_col"))
             sg_2b = _sum_component(status, pair_cols.get("sgst_2b_col"))
-            # --- START: THIS IS THE FIX ---
-            ig_2b = _sum_component(status, pair_cols.get("igst_2b_col")) # Corrected "igst_b_col" to "igst_2b_col"
-            # --- END: THIS IS THE FIX ---
+            ig_2b = _sum_component(status, pair_cols.get("igst_2b_col"))
             tot_2b = cg_2b + sg_2b + ig_2b
 
             return ([cg_pr, sg_pr, ig_pr, tot_pr], [cg_2b, sg_2b, ig_2b, tot_2b])
@@ -1306,7 +1374,7 @@ from rq import get_current_job
 import tempfile, os, time
 from concurrent.futures import ThreadPoolExecutor
 
-def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon") -> dict:
+def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal") -> dict:
     def _mark(pct, msg):
         j = get_current_job()
         if j:
@@ -1332,15 +1400,21 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
 
         _mark(30, "Reconciling")
         x = selections
+
+        # --- START: THIS IS THE FIX ---
+        # Pass the gstr2b_format argument down to the reconciliation pipeline.
         blob = _run_reconciliation_pipeline(
-            in2b, inpr,
+            tmp2b_path=in2b, tmppr_path=inpr,
+            gstr2b_format=gstr2b_format,  # Pass it here
             # B2B
-            x.get("inv_2b_b2b",""), x.get("gst_2b_b2b",""), x.get("date_2b_b2b",""), x.get("cgst_2b_b2b",""), x.get("sgst_2b_b2b",""), x.get("igst_2b_b2b",""),
+            inv_2b_b2b_sel=x.get("inv_2b_b2b",""), gst_2b_b2b_sel=x.get("gst_2b_b2b",""), date_2b_b2b_sel=x.get("date_2b_b2b",""), cgst_2b_b2b_sel=x.get("cgst_2b_b2b",""), sgst_2b_b2b_sel=x.get("sgst_2b_b2b",""), igst_2b_b2b_sel=x.get("igst_2b_b2b",""),
             # CDNR
-            x.get("note_2b_cdnr",""), x.get("gst_2b_cdnr",""), x.get("notedate_2b_cdnr",""), x.get("cgst_2b_cdnr",""), x.get("sgst_2b_cdnr",""), x.get("igst_2b_cdnr",""),
+            note_2b_cdnr_sel=x.get("note_2b_cdnr",""), gst_2b_cdnr_sel=x.get("gst_2b_cdnr",""), notedate_2b_cdnr_sel=x.get("notedate_2b_cdnr",""), cgst_2b_cdnr_sel=x.get("cgst_2b_cdnr",""), sgst_2b_cdnr_sel=x.get("sgst_2b_cdnr",""), igst_2b_cdnr_sel=x.get("igst_2b_cdnr",""),
             # PR
-            x.get("inv_pr",""), x.get("gst_pr",""), x.get("date_pr",""), x.get("cgst_pr",""), x.get("sgst_pr",""), x.get("igst_pr","")
+            inv_pr_sel=x.get("inv_pr",""), gst_pr_sel=x.get("gst_pr",""), date_pr_sel=x.get("date_pr",""), cgst_pr_sel=x.get("cgst_pr",""), sgst_pr_sel=x.get("sgst_pr",""), igst_pr_sel=x.get("igst_pr","")
         )
+        # --- END: THIS IS THE FIX ---
+
         _mark(82, f"Reconcile+write took {time.time()-t0:.1f}s")
 
         _mark(85, "Uploading result to Drive")
@@ -1359,6 +1433,11 @@ def reconcile_confirm():
     if not tmp2b or not tmppr or (not os.path.exists(tmp2b)) or (not os.path.exists(tmppr)):
         flash("Upload session expired. Please re-upload the files.")
         return redirect(url_for("index"))
+
+    # --- START: THIS IS THE FIX ---
+    # Get the format choice from the session here, within the request context.
+    gstr2b_format = session.get("gstr2b_format", "portal")
+    # --- END: THIS IS THE FIX ---
 
     sel = {
         # B2B (invoice-based)
@@ -1393,20 +1472,25 @@ def reconcile_confirm():
         except Exception:
             pass
         session.pop("tmp2b", None); session.pop("tmppr", None)
+        # --- START: THIS IS THE FIX ---
+        # Clean up the format from the session as well.
+        session.pop("gstr2b_format", None)
+        # --- END: THIS IS THE FIX ---
 
     user_id = request.form.get("user_id", "anon")
 
-    # --- START: REPLACE THIS BLOCK ---
+    # --- START: THIS IS THE FIX ---
+    # Pass gstr2b_format as a new argument to the background job.
     job = q.enqueue(
         "main.process_reconcile",
-        drive_id_2b, drive_id_pr, sel, user_id,
-        job_timeout=-1,  # <-- FIX 1: Explicitly disable the timeout for the worker.
+        drive_id_2b, drive_id_pr, sel, user_id, gstr2b_format, # Pass it here
+        job_timeout=-1,
         result_ttl=86400,
         failure_ttl=86400
     )
-    # --- FIX 2: Ensure this return statement is present right after creating the job. ---
+    # --- END: THIS IS THE FIX ---
+
     return render_template("progress.html", job_id=job.id)
-    # --- END: REPLACE THIS BLOCK ---
 
 @app.route("/status/<job_id>", methods=["GET"])
 def status(job_id):
@@ -1834,19 +1918,38 @@ def compare_payu_seq():
       <p><a href="#" onclick="history.back(); return false;">Back</a></p>
     """, **res)
 
-# PayU success/failure endpoints (surl/furl) — adapt to verify and update DB
+# REPLACEMENT FUNCTION: Updates user subscription upon successful payment.
 @app.route("/payment_success", methods=["POST", "GET"])
 def payment_success():
     posted = request.form.to_dict() if request.form else request.args.to_dict()
     ok = verify_payu_response(posted)
     if not ok:
-        # log suspicious payload and show error
         app.logger.warning("PayU verification failed for payload: %s", {k: posted.get(k) for k in posted.keys() if k != 'hash' and k != 'sha2'})
         return render_template("payment_failed.html", reason="Hash verification failed", data=posted), 400
 
-    # verify txnid/amount match DB record (if you persist txnid earlier)
-    # then update Transaction record and mark user's subscription active
+    # --- Start Subscription Update Logic ---
+    email = posted.get('email')
+    plan = posted.get('udf1') # We stored the plan name in udf1
+    user = User.query.filter_by(email=email).first()
+
+    if user:
+        user.subscribed = True
+        today = date.today()
+
+        # Extend from today or from the future expiry date if they are re-subscribing early
+        start_date = max(today, user.subscription_expiry_date) if user.subscription_expiry_date else today
+
+        if plan == 'annual':
+            user.subscription_expiry_date = start_date + timedelta(days=365)
+        elif plan == 'half-yearly':
+            user.subscription_expiry_date = start_date + timedelta(days=182) # Approx 6 months
+
+        db.session.commit()
+        flash('Your subscription has been activated successfully!', 'success')
+    # --- End Subscription Update Logic ---
+
     return render_template("payment_success.html", data=posted)
+# --- END: THIS IS THE FIX ---
 
 @app.route("/payment_fail", methods=["POST", "GET"])
 def payment_fail():
@@ -1902,12 +2005,14 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+# REPLACEMENT FUNCTION: Fetches all users for the admin dashboard.
 @app.route('/admin')
 @admin_required
 def admin_dashboard():
     """Displays the admin dashboard with a list of all users."""
     all_users = User.query.order_by(User.id).all()
-    return render_template('admin.html', users=all_users)
+    # Pass today's date to the template to check for expired accounts
+    return render_template('admin.html', users=all_users, today=date.today())
 
 @app.route('/admin/user/<int:user_id>/delete', methods=['POST'])
 @admin_required
@@ -1951,6 +2056,32 @@ def admin_change_password(user_id):
     db.session.commit()
     flash(f'Password for {user_to_edit.email} has been updated.', 'success')
     return redirect(url_for('admin_dashboard'))
+
+# Add this at the top with your other imports
+from datetime import date, timedelta
+
+# --- START: THIS IS THE FIX ---
+# NEW FUNCTION: Handles the free trial logic.
+@app.route('/start_trial', methods=['POST'])
+def start_trial():
+    if not session.get('logged_in'):
+        flash('Please log in to start a free trial.', 'warning')
+        return redirect(url_for('login'))
+
+    user = User.query.filter_by(email=session['email']).first()
+
+    # Prevent users from getting multiple trials
+    if user.subscribed or user.subscription_expiry_date:
+        flash('A free trial is only available for new users who have not subscribed before.', 'danger')
+        return redirect(url_for('subscribe'))
+
+    # Activate the trial
+    user.subscribed = True
+    user.subscription_expiry_date = date.today() + timedelta(days=7)
+    db.session.commit()
+
+    flash('Your 7-day free trial has started! You now have full access.', 'success')
+    return redirect(url_for('index'))
 
 if __name__ == "__main__":
     app.run(debug=True)

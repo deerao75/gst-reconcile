@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+    .edit-container { padding: 48px 24px; max-width: 600px; margin: 0 auto; }
+    .edit-container h2 { text-align: center; margin-bottom: 24px; }
+    .form-card { background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 24px; }
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-weight: 600; color: #374151; margin-bottom: 6px; }
+    input[type="text"], input[type="date"] {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        box-sizing: border-box;
+    }
+    input[type="checkbox"] { margin-right: 8px; vertical-align: middle; }
+    .btn-submit {
+        background: #0b6b4a;
+        color: white;
+        border: 0;
+        padding: 10px 16px;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        width: 100%;
+    }
+    .divider { border-top: 1px solid #e5e7eb; margin: 24px 0; }
+
+    /* --- START: Styles for Quick Actions --- */
+    .quick-actions-title { text-align: center; font-size: 1.2rem; margin-bottom: 16px; color: #1f2937; }
+    .quick-actions-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .btn-grant {
+        background: #3b82f6;
+        color: white;
+        border: 0;
+        padding: 10px 16px;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        width: 100%;
+    }
+    .btn-grant:hover { background-color: #2563eb; }
+    /* --- END: Styles --- */
+</style>
+
+<div class="edit-container">
+    <!-- START: NEW QUICK ACTIONS CARD -->
+    <div class="form-card">
+        <h3 class="quick-actions-title">Grant Subscription Access</h3>
+        <p style="text-align: center; color: #6b7280; margin-top: -10px; margin-bottom: 20px;">
+            This will activate the user and set a new expiry date from today.
+        </p>
+        <div class="quick-actions-grid">
+            <form method="POST">
+                <input type="hidden" name="grant_access" value="1_month">
+                <button type="submit" class="btn-grant">1 Month</button>
+            </form>
+            <form method="POST">
+                <input type="hidden" name="grant_access" value="6_months">
+                <button type="submit" class="btn-grant">6 Months</button>
+            </form>
+            <form method="POST">
+                <input type="hidden" name="grant_access" value="1_year">
+                <button type="submit" class="btn-grant">1 Year</button>
+            </form>
+        </div>
+    </div>
+    <!-- END: NEW QUICK ACTIONS CARD -->
+
+    <div class="form-card">
+        <h3 style="text-align: center;">Manual Edit: {{ user.email }}</h3>
+        <div class="divider"></div>
+        <form method="POST">
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="subscribed" {% if user.subscribed %}checked{% endif %}>
+                    Subscribed
+                </label>
+            </div>
+            <div class="form-group">
+                <label for="expiry_date">Subscription Expiry Date</label>
+                <input type="date" id="expiry_date" name="expiry_date" value="{{ user.subscription_expiry_date.strftime('%Y-%m-%d') if user.subscription_expiry_date }}">
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="is_admin" {% if user.is_admin %}checked{% endif %}>
+                    Is Admin
+                </label>
+            </div>
+            <button type="submit" class="btn-submit">Save Manual Changes</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

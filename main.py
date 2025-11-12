@@ -59,18 +59,35 @@ db = SQLAlchemy(app)
 # User Model (for login/subscribe)
 # main.py
 
+# main.py (update User model)
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(200), nullable=False)
     subscribed = db.Column(db.Boolean, default=False)
-    is_admin = db.Column(db.Boolean, default=False, nullable=False)  # <-- ADD THIS LINE
+    # Add subscription expiry date column (can be NULL)
+    subscription_expiry_date = db.Column(db.Date, nullable=True)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
     def __repr__(self):
         return f'<User {self.email}>'
 
 import threading
 _tables_created = False
 _tables_lock = threading.Lock()
+
+@app.before_request
+def clear_stale_session_if_user_missing():
+    # If browser has a session that claims to be logged_in but the user record
+    # does not exist in the database, clear the session. Prevents "ghost" login.
+    if session.get('logged_in') and session.get('email'):
+        try:
+            u = User.query.filter_by(email=session.get('email')).first()
+        except Exception:
+            u = None
+        if not u:
+            # remove any stale session cookies / keys
+            session.clear()
+
 @app.before_request
 def create_tables_once():
     global _tables_created
@@ -2060,8 +2077,6 @@ def admin_change_password(user_id):
 # Add this at the top with your other imports
 from datetime import date, timedelta
 
-# --- START: THIS IS THE FIX ---
-# NEW FUNCTION: Handles the free trial logic.
 @app.route('/start_trial', methods=['POST'])
 def start_trial():
     if not session.get('logged_in'):
@@ -2069,19 +2084,83 @@ def start_trial():
         return redirect(url_for('login'))
 
     user = User.query.filter_by(email=session['email']).first()
+    if not user:
+        # defensive: shouldn't happen if step (2) is present, but keep safe
+        session.clear()
+        flash('Session invalid. Please log in again.', 'warning')
+        return redirect(url_for('login'))
 
-    # Prevent users from getting multiple trials
-    if user.subscribed or user.subscription_expiry_date:
+    # Prevent users from getting multiple trials: treat any existing expiry as prior subscription/trial.
+    if user.subscribed or getattr(user, 'subscription_expiry_date', None):
         flash('A free trial is only available for new users who have not subscribed before.', 'danger')
         return redirect(url_for('subscribe'))
 
-    # Activate the trial
     user.subscribed = True
     user.subscription_expiry_date = date.today() + timedelta(days=7)
     db.session.commit()
 
     flash('Your 7-day free trial has started! You now have full access.', 'success')
     return redirect(url_for('index'))
+
+@app.route('/admin/edit_user/<int:user_id>', methods=['GET', 'POST'])
+@admin_required
+def edit_user(user_id):
+    """Allows admin to edit a user's subscription and admin status."""
+    user_to_edit = User.query.get_or_404(user_id)
+
+    if request.method == 'POST':
+        # --- START: THIS IS THE FIX - Handle Quick Actions ---
+        grant_action = request.form.get('grant_access')
+        if grant_action:
+            user_to_edit.subscribed = True
+            today = date.today()
+
+            # Start new subscription period from today
+            start_date = today
+
+            if grant_action == '1_month':
+                user_to_edit.subscription_expiry_date = start_date + timedelta(days=30)
+                flash(f'Granted 1 month access to {user_to_edit.email}.', 'success')
+            elif grant_action == '6_months':
+                user_to_edit.subscription_expiry_date = start_date + timedelta(days=182)
+                flash(f'Granted 6 months access to {user_to_edit.email}.', 'success')
+            elif grant_action == '1_year':
+                user_to_edit.subscription_expiry_date = start_date + timedelta(days=365)
+                flash(f'Granted 1 year access to {user_to_edit.email}.', 'success')
+
+            db.session.commit()
+            return redirect(url_for('admin_dashboard'))
+        # --- END: THIS IS THE FIX ---
+
+        # --- Manual Edit Logic (as before) ---
+        if user_to_edit.id == session['user_id'] and not request.form.get('is_admin'):
+            flash('You cannot remove your own admin privileges.', 'danger')
+            return redirect(url_for('edit_user', user_id=user_id))
+
+        user_to_edit.subscribed = request.form.get('subscribed') == 'on'
+        user_to_edit.is_admin = request.form.get('is_admin') == 'on'
+
+        expiry_date_str = request.form.get('expiry_date')
+        if expiry_date_str:
+            user_to_edit.subscription_expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
+        else:
+            # If subscribed is checked but date is cleared, it might expire immediately.
+            # If not subscribed, clear the date.
+            if not user_to_edit.subscribed:
+                 user_to_edit.subscription_expiry_date = None
+
+        db.session.commit()
+        flash(f'User {user_to_edit.email} updated successfully.', 'success')
+        return redirect(url_for('admin_dashboard'))
+
+    return render_template('edit_user.html', user=user_to_edit)
+
+# alias route so older templates that call 'delete_user' still work
+@app.route('/admin/delete_user/<int:user_id>', methods=['POST'])
+@admin_required
+def delete_user(user_id):
+    # Delegate to the existing admin_delete_user implementation
+    return admin_delete_user(user_id)
 
 if __name__ == "__main__":
     app.run(debug=True)

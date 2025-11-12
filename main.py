@@ -1681,6 +1681,8 @@ def login():
         if user and check_password_hash(user.password_hash, password):
             session['logged_in'] = True
             session['email'] = email
+            # NEW: store user id in session so admin checks can rely on it
+            session['user_id'] = user.id
             flash('Logged in successfully.')
             return redirect(url_for('index'))
         else:
@@ -2218,7 +2220,7 @@ def edit_user(user_id):
     user_to_edit = User.query.get_or_404(user_id)
 
     if request.method == 'POST':
-        # --- START: THIS IS THE FIX - Handle Quick Actions ---
+        # --- START: Handle Quick Grant Actions ---
         grant_action = request.form.get('grant_access')
         if grant_action:
             user_to_edit.subscribed = True
@@ -2239,24 +2241,30 @@ def edit_user(user_id):
 
             db.session.commit()
             return redirect(url_for('admin_dashboard'))
-        # --- END: THIS IS THE FIX ---
+        # --- END: Quick Grant Actions ---
 
-        # --- Manual Edit Logic (as before) ---
-        if user_to_edit.id == session['user_id'] and not request.form.get('is_admin'):
+        # Prevent removing your own admin privileges (only enforce if we know who is logged in)
+        current_user_id = session.get('user_id')
+        is_removing_own_admin = (current_user_id is not None and int(current_user_id) == user_to_edit.id and not request.form.get('is_admin'))
+        if is_removing_own_admin:
             flash('You cannot remove your own admin privileges.', 'danger')
             return redirect(url_for('edit_user', user_id=user_id))
 
+        # Manual Edit Logic
         user_to_edit.subscribed = request.form.get('subscribed') == 'on'
         user_to_edit.is_admin = request.form.get('is_admin') == 'on'
 
         expiry_date_str = request.form.get('expiry_date')
         if expiry_date_str:
-            user_to_edit.subscription_expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
+            try:
+                user_to_edit.subscription_expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
+            except Exception:
+                flash('Invalid expiry date format. Use YYYY-MM-DD.', 'danger')
+                return redirect(url_for('edit_user', user_id=user_id))
         else:
-            # If subscribed is checked but date is cleared, it might expire immediately.
             # If not subscribed, clear the date.
             if not user_to_edit.subscribed:
-                 user_to_edit.subscription_expiry_date = None
+                user_to_edit.subscription_expiry_date = None
 
         db.session.commit()
         flash(f'User {user_to_edit.email} updated successfully.', 'success')

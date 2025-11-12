@@ -45,7 +45,8 @@
         </div>
     </div>
 
-    <div class="actions">
+    <div class="upload-actions">
+      <button type="button" id="instruction-btn" class="cta cta-secondary">Instructions for file upload</button>
       <button type="submit" class="cta">Verify and Reconcile</button>
     </div>
 
@@ -60,7 +61,121 @@
   </form>
 </section>
 
+<!-- Instruction Modal -->
+<div id="instruction-modal" class="instruction-modal">
+  <div class="instruction-modal-content">
+    <span class="instruction-modal-close-btn">&times;</span>
+    <h2>File Upload Instructions</h2>
+    <p>To ensure the highest accuracy, please prepare your files according to the guidelines below.</p>
+
+    <hr>
+
+    <h3>GSTR-2B File Requirements</h3>
+    <p>You have two options for your GSTR-2B file. Please select the correct format on the upload page:</p>
+    <ul>
+        <li><strong>GST Portal Format (Recommended):</strong> Use the original, unmodified Excel file from the GST Portal where headers are on rows 5 and 6.</li>
+        <li><strong>Custom Format:</strong> If using a modified file, ensure all column headers are in the <strong>first row</strong>.</li>
+    </ul>
+    <p>For both formats, your file must contain sheets named exactly <strong>"B2B"</strong> and/or <strong>"B2B-CDNR"</strong>.</p>
+
+    <h3>Purchase Register (PR) File Requirements</h3>
+    <ul>
+        <li><strong>File Type:</strong> Must be an Excel file (.xlsx or .xls).</li>
+        <li><strong>Headers:</strong> Use simple, clear, and generic headers in the <strong>first row</strong> (e.g., "Invoice Number", "Supplier GSTIN", "Invoice Date", "CGST").</li>
+        <li><strong>Essential Data:</strong> The file must contain columns for the supplier's GSTIN, invoice number, invoice date, taxable value, and tax amounts.</li>
+    </ul>
+
+    <h3>General Tips for Data Accuracy</h3>
+    <ul>
+      <li><strong>Date Format:</strong> Ensure all dates are in the <strong>DD-MM-YYYY</strong> format (e.g., 25-11-2025) for best results.</li>
+      <li><strong>Clean Numeric Values:</strong> All monetary columns (Taxable Value, CGST, etc.) must contain only numbers. Remove currency symbols (₹), commas, and text.</li>
+      <li><strong>Correct GSTINs:</strong> Double-check that all GSTINs are in the correct 15-character format without extra spaces or special characters.</li>
+    </ul>
+    <button type="button" class="instruction-modal-close-cta">Close</button>
+  </div>
+</div>
+
 <style>
+/* Scoped styles for the action buttons */
+.upload-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.upload-actions .cta-secondary {
+    background-color: #6c757d;
+    border-color: #6c757d;
+}
+.upload-actions .cta-secondary:hover {
+    background-color: #5a6268;
+    border-color: #5a6268;
+}
+
+/* Styles for the instruction modal */
+.instruction-modal {
+  display: none;
+  position: fixed;
+  z-index: 1001;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background-color: rgba(0,0,0,0.7);
+  align-items: center;
+  justify-content: center;
+}
+.instruction-modal-content {
+  background-color: #f0f0f0;
+  color: #000;
+  margin: auto;
+  padding: 25px 30px;
+  border-radius: 8px;
+  max-width: 800px;
+  width: 90%;
+  position: relative;
+  text-align: left; /* Ensure content is left-aligned */
+}
+.instruction-modal-content h2 { color: #000; margin-top: 0; }
+.instruction-modal-content h3 { color: #333; margin-top: 1.2rem; }
+.instruction-modal-content p, .instruction-modal-content ul {
+    line-height: 1.6;
+    text-align: justify;
+}
+.instruction-modal-content ul {
+    list-style: disc;
+    padding-left: 20px;
+    text-align: left;
+}
+.instruction-modal-content hr {
+    border: none;
+    border-top: 1px solid #ccc;
+    margin: 1rem 0;
+}
+.instruction-modal-close-btn {
+  color: #aaa;
+  position: absolute;
+  top: 10px;
+  right: 20px;
+  font-size: 28px;
+  font-weight: bold;
+  cursor: pointer;
+}
+.instruction-modal-close-btn:hover { color: #000; }
+.instruction-modal-close-cta {
+  display: block;
+  margin: 1.5rem auto 0;
+  padding: 10px 25px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  background-color: #ffc107;
+  color: #000;
+  font-weight: bold;
+}
+
 /* Original styles for upload boxes */
 .upload-grid {
   display: grid;
@@ -114,9 +229,7 @@
     cursor: pointer;
     transition: background 0.2s;
     font-size: 0.9rem;
-    /* START: THIS IS THE FIX */
     color: #fff;
-    /* END: THIS IS THE FIX */
 }
 .format-selector-box .radio-group label:hover {
     background: rgba(0,0,0,0.4);
@@ -149,21 +262,13 @@
   line-height: 1.4rem;
   font-size: 0.95rem;
 }
-.remark-box span.matched {
-  color: #4ae27e;
-  font-weight: 600;
-}
-.remark-box span.almost {
-  color: #ffd966;
-  font-weight: 600;
-}
-.remark-box span.missing {
-  color: #ff7b00;
-  font-weight: 600;
-}
+.remark-box span.matched { color: #4ae27e; font-weight: 600; }
+.remark-box span.almost { color: #ffd966; font-weight: 600; }
+.remark-box span.missing { color: #ff7b00; font-weight: 600; }
 </style>
 
 <script>
+  // Original script for file names
   const f2b = document.getElementById('file2b');
   const fpr = document.getElementById('filepr');
   const n2b = document.getElementById('file2bName');
@@ -178,5 +283,27 @@
   }
   f2b.addEventListener('change', () => showName(f2b, n2b));
   fpr.addEventListener('change', () => showName(fpr, npr));
+
+  // New script for the instruction modal
+  document.addEventListener('DOMContentLoaded', () => {
+    const modal = document.getElementById('instruction-modal');
+    const openBtn = document.getElementById('instruction-btn');
+    const closeBtns = document.querySelectorAll('.instruction-modal-close-btn, .instruction-modal-close-cta');
+
+    const openModal = () => { if (modal) modal.style.display = 'flex'; };
+    const closeModal = () => { if (modal) modal.style.display = 'none'; };
+
+    if(openBtn) {
+        openBtn.addEventListener('click', openModal);
+    }
+
+    closeBtns.forEach(btn => btn.addEventListener('click', closeModal));
+
+    window.addEventListener('click', (event) => {
+      if (event.target === modal) {
+        closeModal();
+      }
+    });
+  });
 </script>
 {% endblock %}

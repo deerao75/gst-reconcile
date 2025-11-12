@@ -1,94 +1,146 @@
 {% extends "base.html" %}
 {% block content %}
-<style>
-    .edit-container { padding: 48px 24px; max-width: 600px; margin: 0 auto; }
-    .edit-container h2 { text-align: center; margin-bottom: 24px; }
-    .form-card { background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 24px; }
-    .form-group { margin-bottom: 16px; }
-    label { display: block; font-weight: 600; color: #374151; margin-bottom: 6px; }
-    input[type="text"], input[type="date"] {
-        width: 100%;
-        padding: 8px 12px;
-        border: 1px solid #d1d5db;
-        border-radius: 4px;
-        box-sizing: border-box;
-    }
-    input[type="checkbox"] { margin-right: 8px; vertical-align: middle; }
-    .btn-submit {
-        background: #0b6b4a;
-        color: white;
-        border: 0;
-        padding: 10px 16px;
-        border-radius: 6px;
-        font-weight: 600;
-        cursor: pointer;
-        width: 100%;
-    }
-    .divider { border-top: 1px solid #e5e7eb; margin: 24px 0; }
+<section class="panel">
+    <h1 style="text-align: center;">Edit User: {{ user.email }}</h1>
 
-    /* --- START: Styles for Quick Actions --- */
-    .quick-actions-title { text-align: center; font-size: 1.2rem; margin-bottom: 16px; color: #1f2937; }
-    .quick-actions-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
-    .btn-grant {
-        background: #3b82f6;
-        color: white;
-        border: 0;
-        padding: 10px 16px;
-        border-radius: 6px;
-        font-weight: 600;
-        cursor: pointer;
-        width: 100%;
-    }
-    .btn-grant:hover { background-color: #2563eb; }
-    /* --- END: Styles --- */
-</style>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash-message {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
 
-<div class="edit-container">
-    <!-- START: NEW QUICK ACTIONS CARD -->
-    <div class="form-card">
-        <h3 class="quick-actions-title">Grant Subscription Access</h3>
-        <p style="text-align: center; color: #6b7280; margin-top: -10px; margin-bottom: 20px;">
-            This will activate the user and set a new expiry date from today.
-        </p>
-        <div class="quick-actions-grid">
-            <form method="POST">
-                <input type="hidden" name="grant_access" value="1_month">
-                <button type="submit" class="btn-grant">1 Month</button>
-            </form>
-            <form method="POST">
-                <input type="hidden" name="grant_access" value="6_months">
-                <button type="submit" class="btn-grant">6 Months</button>
-            </form>
-            <form method="POST">
-                <input type="hidden" name="grant_access" value="1_year">
-                <button type="submit" class="btn-grant">1 Year</button>
-            </form>
-        </div>
-    </div>
-    <!-- END: NEW QUICK ACTIONS CARD -->
-
-    <div class="form-card">
-        <h3 style="text-align: center;">Manual Edit: {{ user.email }}</h3>
-        <div class="divider"></div>
-        <form method="POST">
+    <div class="edit-forms-container">
+        <!-- Manual Edit Form -->
+        <form action="{{ url_for('edit_user', user_id=user.id) }}" method="POST" class="edit-form">
+            <h2>Manual Edit</h2>
             <div class="form-group">
-                <label>
-                    <input type="checkbox" name="subscribed" {% if user.subscribed %}checked{% endif %}>
-                    Subscribed
-                </label>
+                <label for="subscribed">Subscribed:</label>
+                <input type="checkbox" id="subscribed" name="subscribed" {% if user.subscribed %}checked{% endif %}>
             </div>
             <div class="form-group">
-                <label for="expiry_date">Subscription Expiry Date</label>
-                <input type="date" id="expiry_date" name="expiry_date" value="{{ user.subscription_expiry_date.strftime('%Y-%m-%d') if user.subscription_expiry_date }}">
+                <label for="expiry_date">Subscription Expiry Date:</label>
+                <input type="date" id="expiry_date" name="expiry_date" value="{{ user.subscription_expiry_date.strftime('%Y-%m-%d') if user.subscription_expiry_date else '' }}">
+                <small>Format: YYYY-MM-DD. Leave blank to clear the date.</small>
             </div>
             <div class="form-group">
-                <label>
-                    <input type="checkbox" name="is_admin" {% if user.is_admin %}checked{% endif %}>
-                    Is Admin
-                </label>
+                <label for="is_admin">Is Admin:</label>
+                <input type="checkbox" id="is_admin" name="is_admin" {% if user.is_admin %}checked{% endif %}>
             </div>
-            <button type="submit" class="btn-submit">Save Manual Changes</button>
+            <div class="form-actions">
+                <button type="submit" class="btn-submit">Save Changes</button>
+            </div>
+        </form>
+
+        <!-- Quick Grant Access Form -->
+        <form action="{{ url_for('edit_user', user_id=user.id) }}" method="POST" class="edit-form">
+            <h2>Quick Grant Access</h2>
+            <p>Grant a new subscription period starting from today.</p>
+            <div class="form-actions-grant">
+                <button type="submit" name="grant_access" value="1_month" class="btn-grant">Grant 1 Month</button>
+                <button type="submit" name="grant_access" value="6_months" class="btn-grant">Grant 6 Months</button>
+                <button type="submit" name="grant_access" value="1_year" class="btn-grant">Grant 1 Year</button>
+            </div>
         </form>
     </div>
-</div>
+    <div style="text-align: center; margin-top: 2rem;">
+        <a href="{{ url_for('admin_dashboard') }}" class="back-link">&larr; Back to Admin Dashboard</a>
+    </div>
+</section>
+
+<style>
+.edit-forms-container {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    max-width: 800px;
+    margin: 2rem auto;
+}
+@media (min-width: 768px) {
+    .edit-forms-container {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+.edit-form {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 12px;
+    padding: 1.5rem 2rem;
+    color: #fff;
+}
+.edit-form h2 {
+    color: #ff9500;
+    margin-top: 0;
+    border-bottom: 1px solid rgba(255,255,255,0.2);
+    padding-bottom: 0.5rem;
+}
+.form-group {
+    margin-bottom: 1.5rem;
+}
+.form-group label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: bold;
+}
+.form-group input[type="date"] {
+    width: 100%;
+    padding: 8px;
+    background: #333;
+    border: 1px solid #555;
+    color: #fff;
+    border-radius: 4px;
+}
+.form-group small {
+    display: block;
+    margin-top: 0.5rem;
+    color: #aaa;
+}
+.form-actions {
+    text-align: right;
+}
+.form-actions-grant {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+.btn-submit, .btn-grant {
+    padding: 10px 20px;
+    border-radius: 5px;
+    border: none;
+    cursor: pointer;
+    font-weight: bold;
+}
+.btn-submit {
+    background-color: #28a745;
+    color: white;
+}
+.btn-submit:hover {
+    background-color: #218838;
+}
+.btn-grant {
+    background-color: #17a2b8;
+    color: white;
+}
+.btn-grant:hover {
+    background-color: #138496;
+}
+.back-link {
+    color: #ffc107;
+    text-decoration: none;
+}
+.back-link:hover {
+    text-decoration: underline;
+}
+
+/* Flash messages */
+.flash-message {
+  padding: 1rem;
+  margin: 1rem 0;
+  border-radius: 8px;
+  text-align: center;
+}
+.flash-message.success { background-color: #28a745; color: white; }
+.flash-message.danger { background-color: #dc3545; color: white; }
+</style>
 {% endblock %}

@@ -1,99 +1,141 @@
 {% extends "base.html" %}
 {% block content %}
-<style>
-    .admin-container { padding: 48px 24px; max-width: 1200px; margin: 0 auto; }
-    .admin-container h2 { text-align: center; margin-bottom: 24px; }
-    table { width: 100%; border-collapse: collapse; box-shadow: 0 4px 12px rgba(0,0,0,0.08); background: #fff; }
-    th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #e5e7eb; }
-    th { background-color: #f9fafb; font-weight: 600; color: #374151; }
-    tr:hover { background-color: #f9fafb; }
-    .status-active { color: #059669; font-weight: 600; }
-    .status-inactive { color: #d97706; font-weight: 600; }
-    .status-expired { color: #dc2626; font-weight: 600; }
-    .admin-badge {
-        background-color: #eef2ff;
-        color: #4338ca;
-        padding: 2px 8px;
-        border-radius: 12px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        margin-left: 8px;
-    }
-    .action-btn {
-        padding: 4px 8px;
-        border-radius: 4px;
-        text-decoration: none;
-        font-size: 0.9rem;
-        margin-right: 6px;
-    }
-    .edit-btn { background-color: #dbeafe; color: #1e40af; }
-    .delete-btn { background-color: #fee2e2; color: #991b1b; border: none; font-family: inherit; cursor: pointer; }
-</style>
-
-<div class="admin-container">
-    <h2>Admin Dashboard - User Management</h2>
+<section class="panel">
+    <h1 style="text-align: center; color: #ffffff;">Admin Dashboard</h1>
+    <h2 style="text-align: center;">User Management</h2>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for category, message in messages %}
-          <div class="flash-{{ category }}">{{ message }}</div>
+          <div class="flash-message {{ category }}">{{ message }}</div>
         {% endfor %}
       {% endif %}
     {% endwith %}
 
-    <table>
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Email</th>
-                <th>Subscribed</th>
-                <th>Expiry Date</th>
-                <th>Status</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for user in users %}
-            <tr>
-                <td>{{ user.id }}</td>
-                <td>
-                    {{ user.email }}
-                    {% if user.is_admin %}
-                        <span class="admin-badge">Admin</span>
-                    {% endif %}
-                </td>
-                <td>
-                    {% if user.subscribed %}
-                        <span class="status-active">Yes</span>
-                    {% else %}
-                        <span class="status-inactive">No</span>
-                    {% endif %}
-                </td>
-                <td>
-                    {{ user.subscription_expiry_date.strftime('%d-%b-%Y') if user.subscription_expiry_date else 'N/A' }}
-                </td>
-                <td>
-                    {% if user.subscribed and user.subscription_expiry_date and user.subscription_expiry_date >= today %}
-                        <span class="status-active">Active</span>
-                    {% elif user.subscribed %}
-                        <span class="status-expired">Expired</span>
-                    {% else %}
-                        <span class="status-inactive">Not Subscribed</span>
-                    {% endif %}
-                </td>
-                <td>
-                    {% if user.id == session.user_id %}
-                        (Current Admin)
-                    {% else %}
-                        <a href="{{ url_for('edit_user', user_id=user.id) }}" class="action-btn edit-btn">Edit</a>
-                        <form method="POST" action="{{ url_for('delete_user', user_id=user.id) }}" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this user?');">
-                            <button type="submit" class="action-btn delete-btn">Delete</button>
+    <div class="user-table-container">
+        <table class="user-table">
+            <thead>
+                <tr>
+                    <th>User ID</th>
+                    <th>Email</th>
+                    <th>Subscribed</th>
+                    <th>Expiry Date</th>
+                    <th>Is Admin</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>{{ user.id }}</td>
+                    <td>{{ user.email }}</td>
+                    <td>
+                        {% if user.subscribed %}
+                            <span class="status-active">Yes</span>
+                        {% else %}
+                            <span class="status-inactive">No</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if user.subscription_expiry_date %}
+                            {% if user.subscription_expiry_date < today %}
+                                <span class="status-expired">{{ user.subscription_expiry_date.strftime('%Y-%m-%d') }} (Expired)</span>
+                            {% else %}
+                                {{ user.subscription_expiry_date.strftime('%Y-%m-%d') }}
+                            {% endif %}
+                        {% else %}
+                            N/A
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if user.is_admin %}
+                            <span class="status-active">Yes</span>
+                        {% else %}
+                            No
+                        {% endif %}
+                    </td>
+                    <td class="actions-cell">
+                        <a href="{{ url_for('edit_user', user_id=user.id) }}" class="btn-edit">Edit</a>
+
+                        {# Prevent admin from deleting themselves #}
+                        {% if session.get('user_id') != user.id %}
+                        <form action="{{ url_for('delete_user', user_id=user.id) }}" method="POST" onsubmit="return confirm('Are you sure you want to delete this user?');" style="display: inline;">
+                            <button type="submit" class="btn-delete">Delete</button>
                         </form>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<style>
+.user-table-container {
+    overflow-x: auto;
+    margin-top: 2rem;
+}
+.user-table {
+    width: 100%;
+    border-collapse: collapse;
+    color: #fff;
+}
+.user-table th, .user-table td {
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 10px 15px;
+    text-align: left;
+}
+.user-table th {
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #ff9500;
+}
+.actions-cell {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+.btn-edit, .btn-delete {
+    padding: 6px 12px;
+    border-radius: 5px;
+    text-decoration: none;
+    color: white;
+    cursor: pointer;
+    border: none;
+    font-size: 0.9rem;
+}
+.btn-edit {
+    background-color: #007bff;
+}
+.btn-edit:hover {
+    background-color: #0056b3;
+}
+.btn-delete {
+    background-color: #dc3545;
+}
+.btn-delete:hover {
+    background-color: #c82333;
+}
+.status-active {
+    color: #28a745;
+    font-weight: bold;
+}
+.status-inactive {
+    color: #ffc107;
+}
+.status-expired {
+    color: #dc3545;
+    font-weight: bold;
+}
+/* Flash messages */
+.flash-message {
+  padding: 1rem;
+  margin: 1rem 0;
+  border-radius: 8px;
+  text-align: center;
+}
+.flash-message.success { background-color: #28a745; color: white; }
+.flash-message.danger { background-color: #dc3545; color: white; }
+.flash-message.warning { background-color: #ffc107; color: black; }
+</style>
 {% endblock %}

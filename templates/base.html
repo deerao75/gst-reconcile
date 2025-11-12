@@ -44,6 +44,7 @@
     .nav-menu {
       display: flex;
       gap: 16px;
+      align-items: center;
     }
     .nav-menu a,
     .nav-menu form button {
@@ -79,6 +80,10 @@
     .footer a {
       color: #ffad33;
       text-decoration: none;
+      cursor: pointer;
+    }
+    .footer a:hover {
+        text-decoration: underline;
     }
     .subscription-plans {
       display: flex;
@@ -158,95 +163,70 @@
       color: #000;
     }
 
-    /* --- New Styles for Upload Page --- */
-    .upload-card {
-      background: #1a1a1a;
-      padding: 24px;
-      border-radius: 12px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-      margin-top: 24px;
+    /* Styles for the modal popups */
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1001;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      overflow: auto;
+      background-color: rgba(0,0,0,0.7);
+      align-items: center;
+      justify-content: center;
     }
-    .upload-card h2 {
-      color: #ffffff; /* 🔹 White heading */
-      margin-top: 0;
-      margin-bottom: 12px;
-    }
-    .upload-card p {
-      color: #cccccc;
-      margin-bottom: 20px;
-      line-height: 1.5;
-    }
-    .file-box {
-      background: #2d2d2d;
-      padding: 20px;
+    .modal-content {
+      background-color: #f0f0f0; /* Grey box */
+      color: #000; /* Black text */
+      margin: auto;
+      padding: 25px 30px;
       border-radius: 8px;
-      margin-bottom: 20px;
-      border: 1px dashed #666;
+      max-width: 800px; /* Increased from 650px */
+      width: 90%;
+      position: relative;
+      text-align: left;
     }
-    .file-box h3 {
-      color: #ffffff; /* 🔹 White subheading */
+    .modal-content h2 {
       margin-top: 0;
-      margin-bottom: 8px;
-      font-size: 1.1rem;
+      font-size: 1.6rem;
     }
-    .file-box p {
-      color: #aaaaaa;
-      margin-bottom: 12px;
-      font-size: 0.9rem;
+    .modal-content h3 {
+        margin-top: 1.2rem;
+        font-size: 1.1rem;
+        font-weight: 600;
     }
-    .file-box .btn {
-      background: #ff9500;
+    .modal-content p {
+        text-align: justify;
+    }
+    .modal-content strong {
+        font-weight: bold;
+    }
+    .modal-close-btn {
+      color: #aaa;
+      position: absolute;
+      top: 10px;
+      right: 20px;
+      font-size: 28px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    .modal-close-btn:hover,
+    .modal-close-btn:focus {
       color: #000;
+    }
+    .modal-close-cta {
+      display: block;
+      margin: 1.5rem auto 0;
+      padding: 10px 25px;
       border: none;
-      padding: 8px 16px;
-      border-radius: 4px;
-      font-weight: 600;
+      border-radius: 5px;
       cursor: pointer;
-    }
-    .file-box .btn:hover {
-      background: #ffad33;
-    }
-    .action-btn {
-      background: transparent;
-      border: 1px solid #ffffff;
-      color: #ffffff;
-      padding: 8px 16px;
-      border-radius: 4px;
-      font-weight: 600;
-      cursor: pointer;
-      margin-top: 12px;
-    }
-    .action-btn:hover {
-      background: #ffffff;
+      background-color: #ffc107;
       color: #000;
-    }
-    .mapping-explained {
-      background: #2d2d2d;
-      padding: 20px;
-      border-radius: 8px;
-      margin-top: 24px;
-      border: 1px solid #444;
-    }
-    .mapping-explained h3 {
-      color: #ff9500; /* Orange header */
-      margin-top: 0;
-      margin-bottom: 12px;
-    }
-    .mapping-explained ul {
-      color: #cccccc;
-      padding-left: 20px;
-    }
-    .mapping-explained li {
-      margin-bottom: 8px;
-    }
-    .mapping-explained .matched {
-      color: #4caf50; /* Green */
-    }
-    .mapping-explained .almost-matched {
-      color: #ff9800; /* Orange */
-    }
-    .mapping-explained .not-matched {
-      color: #ff5722; /* Red */
+      font-weight: bold;
+      font-size: 1rem;
     }
   </style>
 </head>
@@ -256,9 +236,10 @@
       <div class="logo">
         <img src="{{ url_for('static', filename='acer_logo.png') }}" alt="AcerGST Logo">
       </div>
-      <div class="title">Acer GST ↔ PR vs. 2B Reconciliation</div> <!-- ✅ Text moved to right of logo -->
+      <div class="title">Acer GST ↔ PR vs. 2B Reconciliation</div>
     </div>
     <div class="nav-menu">
+      <a href="{{ url_for('index') }}">Home</a>
       {% if session.logged_in %}
         <a href="{{ url_for('logout') }}" class="btn btn-secondary">Logout</a>
         <a href="{{ url_for('subscribe') }}">Subscribe</a>
@@ -287,8 +268,101 @@
   <footer class="footer">
     <div>
       © {{ 2025 }} AcerGST • <span class="muted">All Rights Reserved</span> •
-      <a href="mailto:info@acertax.com" class="muted">info@acertax.com</a>
+      <a href="mailto:info@acertax.com" class="muted">info@acertax.com</a> |
+      <a id="terms-link">Terms & Conditions</a> |
+      <a id="refund-link">Refund Policy</a>
     </div>
   </footer>
+
+  <!-- Terms and Conditions Modal -->
+  <div id="terms-modal" class="modal">
+    <div class="modal-content">
+      <span class="modal-close-btn" data-modal-id="terms-modal">&times;</span>
+      <h2>Terms and Conditions for use of Acer Nova</h2>
+      <p><small>Last Updated: 12-11-2025</small></p>
+
+      <h3>1. Acceptance of Terms</h3>
+      <p>By uploading files, creating an account, or otherwise using the Service, you acknowledge that you have read, understood, and agree to be bound by these Terms and our Privacy Policy.</p>
+
+      <h3>2. Service Availability and "As-Is" Basis</h3>
+      <p>The Service is provided on an "as-is" and "as-available" basis. We do not guarantee that the Service will be uninterrupted, timely, secure, or error-free. We will not be liable for any modification, suspension, or discontinuance of the Service.</p>
+
+      <h3>3. Accuracy of Output and User Responsibility</h3>
+      <p>The accuracy and completeness of the reconciliation output are entirely dependent on the quality of the input files you provide. Errors or malformed data in your uploaded files will result in inaccurate output. It is solely your responsibility to review and verify the accuracy of the output before using it for any accounting, financial, or statutory purposes.</p>
+
+      <h3>4. Data and Privacy</h3>
+      <p>When you upload files, they are processed by our system and may be stored temporarily. You are responsible for the data you upload and agree not to upload sensitive personal information not strictly necessary for reconciliation. You warrant that you have the necessary rights to process the data you provide.</p>
+
+      <h3>5. Limitation of Liability</h3>
+      <p>Acer Tax & Corporate Services LLP shall not be liable for any indirect, incidental, or consequential damages, or any loss of profits or revenues, resulting from your use or inability to use the Service or your reliance on the output generated by the Service.</p>
+
+      <button type="button" class="modal-close-cta" data-modal-id="terms-modal">Close</button>
+    </div>
+  </div>
+
+  <!-- Refund Policy Modal -->
+  <div id="refund-modal" class="modal">
+    <div class="modal-content">
+      <span class="modal-close-btn" data-modal-id="refund-modal">&times;</span>
+      <h2>Refund Policy for Acer Nova</h2>
+      <p><small>Last Updated: 12-11-2025</small></p>
+
+      <h3>1. General Policy</h3>
+      <p>Due to the digital nature of our Service and the immediate access granted upon subscription, our general policy is that all subscription fees are non-refundable. We do not offer refunds or credits for partial subscription periods or unused time.</p>
+
+      <h3>2. Exceptional Circumstances</h3>
+      <p>While our policy is non-refundable, AcerGST may, at its sole discretion, consider a refund in exceptional circumstances, such as demonstrable technical failures originating from our Service or significant billing errors. Additionally, any incorrect or duplicate charges (double debits) to your account where the excess payment was received by us will be refunded after the error is brought to our attention and verified.</p>
+
+      <h3>3. How to Request a Refund</h3>
+      <p>If you believe your situation qualifies, you must submit a request in writing to <strong>info@acertax.com</strong>. Your email must include your registered email address, date of purchase, and a detailed explanation for your request. Submitting a request does not guarantee a refund, and all decisions made by the Acer tax team are final.</p>
+
+      <button type="button" class="modal-close-cta" data-modal-id="refund-modal">Close</button>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const modals = {
+            'terms-link': document.getElementById('terms-modal'),
+            'refund-link': document.getElementById('refund-modal')
+        };
+
+        const openModal = (modal) => {
+            if (modal) modal.style.display = 'flex';
+        };
+
+        const closeModal = (modal) => {
+            if (modal) modal.style.display = 'none';
+        };
+
+        // Event listeners for opening modals
+        document.getElementById('terms-link').addEventListener('click', (e) => {
+            e.preventDefault();
+            openModal(modals['terms-link']);
+        });
+
+        document.getElementById('refund-link').addEventListener('click', (e) => {
+            e.preventDefault();
+            openModal(modals['refund-link']);
+        });
+
+        // Event listeners for closing modals (buttons and 'x')
+        document.querySelectorAll('.modal-close-btn, .modal-close-cta').forEach(button => {
+            button.addEventListener('click', () => {
+                const modalId = button.getAttribute('data-modal-id');
+                const modalToClose = document.getElementById(modalId);
+                closeModal(modalToClose);
+            });
+        });
+
+        // Event listener for closing modals by clicking the overlay
+        window.addEventListener('click', (event) => {
+            if (event.target.classList.contains('modal')) {
+                closeModal(event.target);
+            }
+        });
+    });
+  </script>
+
 </body>
 </html>

@@ -1,4 +1,3 @@
-# main.py
 import io
 import re
 import os
@@ -25,6 +24,15 @@ import sqlalchemy as sa
 from sqlalchemy import inspect
 from datetime import date, timedelta
 
+# DEBUG STARTUP MARKER — keeps the worker logs honest
+import hashlib, time, os
+try:
+    _path = __file__
+    _mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(_path)))
+    _sha1 = hashlib.sha1(open(_path, 'rb').read()).hexdigest()
+    print(f"APP_START_MARKER path={_path} mtime={_mtime} sha1={_sha1}", flush=True)
+except Exception as _e:
+    print("APP_START_MARKER ERROR", _e, flush=True)
 
 # -------------------- Flask & App Config --------------------
 app = Flask(__name__)
@@ -1238,6 +1246,58 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
     inv_type_2b_b2b = ensure_col(df_b2b_raw, "", INV_TYPE_CANDIDATES)
     inv_type_2b_cdnr = ensure_col(df_cdnr_raw, "", INV_TYPE_CANDIDATES)
 
+    # ========== BUILD LOOKUPS FROM RAW DATA BEFORE ANY PROCESSING ==========
+    # Calculate header offset for Excel row numbers
+    header_offset = 6 if gstr2b_format == "portal" else 1
+
+    row_num_lookup = {}
+    period_lookup = {}
+
+    # Process B2B sheet for lookups
+    if df_b2b_raw is not None and not df_b2b_raw.empty and gst_2b_b2b and inv_2b_b2b:
+        gstr1_period_col_b2b = _find_optional_col(df_b2b_raw, [GSTR1_STATUS_2B_CANDIDATES])
+        for idx, row in df_b2b_raw.iterrows():
+            gst = clean_gstin(row.get(gst_2b_b2b, ""))
+            inv = inv_basic(row.get(inv_2b_b2b, ""))
+            if gst and inv:
+                key = (gst, inv)
+                # Excel row number: pandas index + header offset
+                excel_row = idx + header_offset
+
+                # Store row numbers (handle multiple rows with same key)
+                if key not in row_num_lookup:
+                    row_num_lookup[key] = []
+                row_num_lookup[key].append(excel_row)
+
+                # Store period (use first occurrence)
+                if key not in period_lookup and gstr1_period_col_b2b:
+                    period_lookup[key] = as_text(row.get(gstr1_period_col_b2b, ""))
+
+    # Process CDNR sheet for lookups
+    if df_cdnr_raw is not None and not df_cdnr_raw.empty and gst_2b_cdnr and note_2b_cdnr:
+        gstr1_period_col_cdnr = _find_optional_col(df_cdnr_raw, [GSTR1_STATUS_2B_CANDIDATES])
+        for idx, row in df_cdnr_raw.iterrows():
+            gst = clean_gstin(row.get(gst_2b_cdnr, ""))
+            inv = inv_basic(row.get(note_2b_cdnr, ""))
+            if gst and inv:
+                key = (gst, inv)
+                # Excel row number: pandas index + header offset
+                excel_row = idx + header_offset
+
+                # Store row numbers (handle multiple rows with same key)
+                if key not in row_num_lookup:
+                    row_num_lookup[key] = []
+                row_num_lookup[key].append(excel_row)
+
+                # Store period (use first occurrence)
+                if key not in period_lookup and gstr1_period_col_cdnr:
+                    period_lookup[key] = as_text(row.get(gstr1_period_col_cdnr, ""))
+
+    # Convert row number lists to comma-separated strings
+    for key in row_num_lookup:
+        row_num_lookup[key] = ", ".join(map(str, sorted(row_num_lookup[key])))
+    # ========== END OF LOOKUP BUILDING ==========
+
     def apply_signs(df, note_type_col: Optional[str]) -> pd.DataFrame:
         if df.empty:
             return df
@@ -1268,8 +1328,11 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
             df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
         return df
 
-    df_b2b_raw = apply_signs(df_b2b_raw, note_type_col=note_type_2b)
-    df_cdnr_raw = apply_signs(df_cdnr_raw, note_type_col=note_type_2b)
+    # --- START: THE FIX ---
+    # We pass a .copy() to apply_signs, ensuring the original df_b2b_raw and df_cdnr_raw are not modified.
+    df_b2b_raw_signed = apply_signs(df_b2b_raw.copy(), note_type_col=note_type_2b)
+    df_cdnr_raw_signed = apply_signs(df_cdnr_raw.copy(), note_type_col=note_type_2b)
+    # --- END: THE FIX ---
 
     gst_pr = match_provided(df_pr_raw, gst_pr_sel) or ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
                         penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
@@ -1294,29 +1357,27 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 res.append(col)
         return res
 
-    opt_2b_b2b = optional_numeric_list(df_b2b_raw)
-    _append_if_missing(opt_2b_b2b, [ensure_col(df_b2b_raw, "", CGST_CANDIDATES_2B),
-                                    ensure_col(df_b2b_raw, "", SGST_CANDIDATES_2B),
-                                    ensure_col(df_b2b_raw, "", IGST_CANDIDATES_2B)])
+    opt_2b_b2b = optional_numeric_list(df_b2b_raw_signed)
+    _append_if_missing(opt_2b_b2b, [ensure_col(df_b2b_raw_signed, "", CGST_CANDIDATES_2B),
+                                    ensure_col(df_b2b_raw_signed, "", SGST_CANDIDATES_2B),
+                                    ensure_col(df_b2b_raw_signed, "", IGST_CANDIDATES_2B)])
 
-    opt_2b_cdnr = optional_numeric_list(df_cdnr_raw)
-    _append_if_missing(opt_2b_cdnr, [ensure_col(df_cdnr_raw, "", CGST_CANDIDATES_2B),
-                                     ensure_col(df_cdnr_raw, "", SGST_CANDIDATES_2B),
-                                     ensure_col(df_cdnr_raw, "", IGST_CANDIDATES_2B)])
+    opt_2b_cdnr = optional_numeric_list(df_cdnr_raw_signed)
+    _append_if_missing(opt_2b_cdnr, [ensure_col(df_cdnr_raw_signed, "", CGST_CANDIDATES_2B),
+                                     ensure_col(df_cdnr_raw_signed, "", SGST_CANDIDATES_2B),
+                                     ensure_col(df_cdnr_raw_signed, "", IGST_CANDIDATES_2B)])
 
     opt_pr = optional_numeric_list(df_pr_raw)
     _append_if_missing(opt_pr, [cgst_pr, sgst_pr, igst_pr])
 
-    # --- START: THIS IS THE FIX ---
-    # Pass the invoice type columns as 'text_cols' so they are preserved correctly.
     df_2b_b2b = consolidate_by_key(
-        df=df_b2b_raw, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b,
+        df=df_b2b_raw_signed, gstin_col=gst_2b_b2b, inv_col=inv_2b_b2b,
         date_col=date_2b_b2b, numeric_cols=opt_2b_b2b,
         text_cols=[inv_type_2b_b2b]
     ) if (df_b2b_raw is not None and not df_b2b_raw.empty and inv_2b_b2b and gst_2b_b2b) else pd.DataFrame()
 
     df_2b_cdnr = consolidate_by_key(
-        df=df_cdnr_raw, gstin_col=gst_2b_cdnr, inv_col=note_2b_cdnr,
+        df=df_cdnr_raw_signed, gstin_col=gst_2b_cdnr, inv_col=note_2b_cdnr,
         date_col=notedate_2b_cdnr, numeric_cols=opt_2b_cdnr,
         text_cols=[inv_type_2b_cdnr]
     ) if (df_cdnr_raw is not None and not df_cdnr_raw.empty and note_2b_cdnr and gst_2b_cdnr) else pd.DataFrame()
@@ -1329,7 +1390,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         date_col=date_pr, numeric_cols=opt_pr,
         text_cols=[inv_type_pr]
     )
-    # --- END: THIS IS THE FIX ---
 
     def add_display_cols(df_, inv_col, date_col, source_tag):
         if df_.empty:
@@ -1346,9 +1406,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
     df_2b_b2b = add_display_cols(df_2b_b2b, inv_2b_b2b, date_2b_b2b, "B2B")
     df_2b_cdnr = add_display_cols(df_2b_cdnr, note_2b_cdnr, notedate_2b_cdnr, "B2B-CDNR")
 
-    if "_NOTE_TYPE" in df_cdnr_raw.columns and not df_2b_cdnr.empty:
-        nt_map = (df_cdnr_raw.assign(_GST_KEY=df_cdnr_raw[gst_2b_cdnr].map(clean_gstin),
-                                     _INV_KEY=df_cdnr_raw[note_2b_cdnr].map(inv_basic))
+    if "_NOTE_TYPE" in df_cdnr_raw_signed.columns and not df_2b_cdnr.empty:
+        nt_map = (df_cdnr_raw_signed.assign(_GST_KEY=df_cdnr_raw_signed[gst_2b_cdnr].map(clean_gstin),
+                                     _INV_KEY=df_cdnr_raw_signed[note_2b_cdnr].map(inv_basic))
                             .dropna(subset=["_GST_KEY","_INV_KEY"]))
         nt_map = nt_map.groupby(["_GST_KEY","_INV_KEY"])["_NOTE_TYPE"].first().to_dict()
         df_2b_cdnr["_NOTE_TYPE"] = df_2b_cdnr.apply(lambda r: nt_map.get((r["_GST_KEY"], r["_INV_KEY"]), ""), axis=1)
@@ -1377,14 +1437,115 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         def get_recon_status(row):
             key = (row["_GST_KEY"], row["_INV_KEY"])
-            return pd.Series(recon_lookup.get(key, ("", "", "")))
+            mapping, remarks, reason = recon_lookup.get(key, ("", "", ""))
 
-        pr_comments[["Mapping", "Remarks", "Reason"]] = pr_comments.apply(get_recon_status, axis=1)
+            # Get row number and period from lookup
+            row_num_2b = ""
+            period_2b = ""
+
+            # Only populate for Matched and Almost Matched
+            if mapping in ["Matched", "Almost Matched"]:
+                row_num_2b = row_num_lookup.get(key, "")
+                period_2b = period_lookup.get(key, "")
+
+            return pd.Series([mapping, remarks, reason, row_num_2b, period_2b])
+
+        pr_comments[["Mapping", "Remarks", "Reason", "Row number in 2B", "2B Month"]] = pr_comments.apply(get_recon_status, axis=1)
         pr_comments.drop(columns=["_GST_KEY", "_INV_KEY"], inplace=True)
     else:
         pr_comments["Mapping"] = ""
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
+        pr_comments["Row number in 2B"] = ""
+        pr_comments["2B Month"] = ""
+
+    # --- START: Logic for GSTR 2B-Comments sheet (B2B-only, keep raw uploaded B2B and append mapping cols) ---
+    # Build gstr2b_comments using only the uploaded B2B sheet (ignore B2B-CDNR for now)
+    try:
+        if df_b2b_raw is not None and not df_b2b_raw.empty:
+            # use the uploaded B2B sheet as-is (already normalized earlier by load_sheet)
+            gstr2b_comments = df_b2b_raw.copy()
+        else:
+            gstr2b_comments = pd.DataFrame()
+    except Exception:
+        gstr2b_comments = pd.DataFrame()
+
+    def _get_b2b_row_status(row):
+        # If gst/invoice columns were not detected, return empty
+        if not gst_2b_b2b or not inv_2b_b2b:
+            return pd.Series(["", "", ""])
+        # If the expected columns are not present on this row, return empty
+        if gst_2b_b2b not in row or inv_2b_b2b not in row:
+            return pd.Series(["", "", ""])
+        try:
+            gst_val = clean_gstin(row[gst_2b_b2b])
+            inv_val = inv_basic(row[inv_2b_b2b])
+            key = (as_text(gst_val), as_text(inv_val))
+            return pd.Series(recon_lookup.get(key, ("", "", "")))
+        except Exception:
+            return pd.Series(["", "", ""])
+
+    # Ensure Mapping/Remarks/Reason columns are appended and populated per B2B row
+    if not gstr2b_comments.empty:
+        for _col in ["Mapping", "Remarks", "Reason"]:
+            if _col not in gstr2b_comments.columns:
+                gstr2b_comments[_col] = ""
+        try:
+            gstr2b_comments[["Mapping", "Remarks", "Reason"]] = gstr2b_comments.apply(_get_b2b_row_status, axis=1)
+        except Exception:
+            # fallback: ensure columns exist if apply fails
+            gstr2b_comments["Mapping"] = gstr2b_comments.get("Mapping", "")
+            gstr2b_comments["Remarks"] = gstr2b_comments.get("Remarks", "")
+            gstr2b_comments["Reason"] = gstr2b_comments.get("Reason", "")
+    else:
+        # create the three columns so the final workbook has headers even if there are no B2B rows
+        gstr2b_comments["Mapping"] = ""
+        gstr2b_comments["Remarks"] = ""
+        gstr2b_comments["Reason"] = ""
+    # --- END: Logic for GSTR 2B-Comments sheet (B2B-only) ---
+
+    # --- START: Logic for GSTR 2B CDNR - Comments sheet (B2B-CDNR only) ---
+    try:
+        if df_cdnr_raw is not None and not df_cdnr_raw.empty:
+            gstr2b_cdnr_comments = df_cdnr_raw.copy()
+        else:
+            gstr2b_cdnr_comments = pd.DataFrame()
+    except Exception:
+        gstr2b_cdnr_comments = pd.DataFrame()
+
+    def _get_cdnr_row_status(row):
+        # If gst/note columns were not detected, return empty
+        if not gst_2b_cdnr or not note_2b_cdnr:
+            return pd.Series(["", "", ""])
+        # If the expected columns are not present on this row, return empty
+        if gst_2b_cdnr not in row or note_2b_cdnr not in row:
+            return pd.Series(["", "", ""])
+        try:
+            gst_val = clean_gstin(row[gst_2b_cdnr])
+            note_val = inv_basic(row[note_2b_cdnr])
+            key = (as_text(gst_val), as_text(note_val))
+            return pd.Series(recon_lookup.get(key, ("", "", "")))
+        except Exception:
+            return pd.Series(["", "", ""])
+
+    # Ensure Mapping/Remarks/Reason columns are appended and populated per CDNR row
+    if not gstr2b_cdnr_comments.empty:
+        for _col in ["Mapping", "Remarks", "Reason"]:
+            if _col not in gstr2b_cdnr_comments.columns:
+                gstr2b_cdnr_comments[_col] = ""
+        try:
+            gstr2b_cdnr_comments[["Mapping", "Remarks", "Reason"]] = gstr2b_cdnr_comments.apply(_get_cdnr_row_status, axis=1)
+        except Exception:
+            # fallback: ensure columns exist if apply fails
+            gstr2b_cdnr_comments["Mapping"] = gstr2b_cdnr_comments.get("Mapping", "")
+            gstr2b_cdnr_comments["Remarks"] = gstr2b_cdnr_comments.get("Remarks", "")
+            gstr2b_cdnr_comments["Reason"] = gstr2b_cdnr_comments.get("Reason", "")
+    else:
+        # create the three columns so the final workbook has headers even if there are no CDNR rows
+        gstr2b_cdnr_comments["Mapping"] = ""
+        gstr2b_cdnr_comments["Remarks"] = ""
+        gstr2b_cdnr_comments["Reason"] = ""
+    # --- END: Logic for GSTR 2B CDNR - Comments sheet ---
 
     cols = list(combined_df.columns)
     if "Invoice Type" in cols:
@@ -1491,6 +1652,83 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         ws3.autofilter(0, 0, len(pr_comments), max(0, pr_comments.shape[1] - 1))
         ws3.set_row(0, None, header_fmt)
         _autosize_ws(ws3, pr_comments)
+
+        # --- WRITE the uploaded B2B sheet into output workbook as "GSTR 2B B2B - Comments" ---
+        try:
+            if 'df_b2b_raw' in locals() and df_b2b_raw is not None and not df_b2b_raw.empty:
+                # Write the raw uploaded B2B sheet as-is
+                # NOTE: Changed per request: write the comments sheet named "GSTR 2B B2B - Comments"
+                # Use gstr2b_comments (built earlier) and ensure Mapping/Remarks/Reason are last three columns.
+                to_write = gstr2b_comments.copy() if 'gstr2b_comments' in locals() else df_b2b_raw.copy()
+
+                # Ensure mapping columns exist
+                for _col in ["Mapping", "Remarks", "Reason"]:
+                    if _col not in to_write.columns:
+                        to_write[_col] = ""
+
+                # Preserve original B2B column order (as present in df_b2b_raw) and append Mapping/Remarks/Reason at the end
+                if 'df_b2b_raw' in locals() and df_b2b_raw is not None:
+                    orig_cols = [c for c in df_b2b_raw.columns if c in to_write.columns]
+                    # If for some reason df_b2b_raw columns are not present in to_write, fall back to to_write's columns excluding mapping cols
+                    if not orig_cols:
+                        orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason"]]
+                else:
+                    orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason"]]
+
+                final_cols = orig_cols + [c for c in ["Mapping", "Remarks", "Reason"] if c in to_write.columns]
+                # Reindex to the final order (this will drop any columns not in final_cols)
+                to_write = to_write.reindex(columns=final_cols)
+
+                to_write.to_excel(writer, index=False, sheet_name="GSTR 2B B2B - Comments")
+                ws4 = writer.sheets["GSTR 2B B2B - Comments"]
+                ws4.freeze_panes(1, 0)
+                ws4.autofilter(0, 0, len(to_write), max(0, to_write.shape[1] - 1))
+                ws4.set_row(0, None, header_fmt)
+                _autosize_ws(ws4, to_write)
+            else:
+                # Ensure a B2B sheet still exists (empty with header row) — renamed sheet and include Mapping cols
+                empty_df = pd.DataFrame(columns=["Mapping", "Remarks", "Reason"])
+                empty_df.to_excel(writer, index=False, sheet_name="GSTR 2B B2B - Comments")
+                ws4 = writer.sheets["GSTR 2B B2B - Comments"]
+                ws4.set_row(0, None, header_fmt)
+        except Exception:
+            app.logger.exception("Could not write B2B sheet to output workbook")
+
+        # --- WRITE the uploaded B2B-CDNR sheet into output workbook as "GSTR 2B CDNR - Comments" ---
+        try:
+            if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None and not df_cdnr_raw.empty:
+                to_write_cd = gstr2b_cdnr_comments.copy() if 'gstr2b_cdnr_comments' in locals() else df_cdnr_raw.copy()
+
+                # Ensure mapping columns exist
+                for _col in ["Mapping", "Remarks", "Reason"]:
+                    if _col not in to_write_cd.columns:
+                        to_write_cd[_col] = ""
+
+                # Preserve original CDNR column order (as present in df_cdnr_raw) and append Mapping/Remarks/Reason at the end
+                if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None:
+                    orig_cd_cols = [c for c in df_cdnr_raw.columns if c in to_write_cd.columns]
+                    if not orig_cd_cols:
+                        orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason"]]
+                else:
+                    orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason"]]
+
+                final_cd_cols = orig_cd_cols + [c for c in ["Mapping", "Remarks", "Reason"] if c in to_write_cd.columns]
+                to_write_cd = to_write_cd.reindex(columns=final_cd_cols)
+
+                to_write_cd.to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")
+                ws5 = writer.sheets["GSTR 2B CDNR - Comments"]
+                ws5.freeze_panes(1, 0)
+                ws5.autofilter(0, 0, len(to_write_cd), max(0, to_write_cd.shape[1] - 1))
+                ws5.set_row(0, None, header_fmt)
+                _autosize_ws(ws5, to_write_cd)
+            else:
+                # Create empty CDNR comments sheet with mapping columns
+                empty_cd_df = pd.DataFrame(columns=["Mapping", "Remarks", "Reason"])
+                empty_cd_df.to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")
+                ws5 = writer.sheets["GSTR 2B CDNR - Comments"]
+                ws5.set_row(0, None, header_fmt)
+        except Exception:
+            app.logger.exception("Could not write CDNR sheet to output workbook")
 
     output.seek(0)
     return output.read()
@@ -2112,7 +2350,6 @@ def debug_payu_hash_print(params: dict):
     print("SHA512(hash_seq):", calc)
     # Do NOT print the raw salt in logs in production..
 
-
 from functools import wraps
 
 # --- Admin Functionality ---
@@ -2278,8 +2515,6 @@ def edit_user(user_id):
 def delete_user(user_id):
     # Delegate to the existing admin_delete_user implementation
     return admin_delete_user(user_id)
-
-
 
 if __name__ == "__main__":
     app.run(debug=True)

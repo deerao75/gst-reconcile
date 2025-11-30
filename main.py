@@ -2087,14 +2087,18 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         header_fmt = wb.add_format({"bold": True})
         comment_highlight_fmt = wb.add_format({"bg_color": "#FFF2CC", "align": "left", "valign": "vcenter"})
 
-        # Dashboard specific formats (with Thin Borders)
+        # Dashboard specific formats
         dash_title_fmt = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "font_size": 12})
         dash_table_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#f2f2f2"})
         dash_table_txt = wb.add_format({"border": 1, "align": "left", "valign": "vcenter"})
         dash_table_num = wb.add_format({"num_format": "#,##0.00", "border": 1, "align": "right", "valign": "vcenter"})
         dash_table_lbl = wb.add_format({"bold": True, "border": 1, "align": "left", "valign": "vcenter"})
 
-        # --- Helper: Highlight Columns (Defined inside writer block) ---
+        # Notes formats (Text wrap enabled for merged cells)
+        note_title_fmt = wb.add_format({"bold": True, "font_size": 11, "valign": "top", "underline": True})
+        note_text_fmt = wb.add_format({"text_wrap": True, "valign": "top", "font_size": 10})
+
+        # --- Helper: Highlight Columns ---
         def _highlight_columns(ws, df, col_names, fmt, include_header: bool = True):
             try:
                 if df is None: return
@@ -2219,6 +2223,28 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         ws2.set_column(0, 0, 50)
         ws2.set_column(1, 5, 16)
+
+        # --- Notes Section (Right of ITC Table) ---
+        # Write across columns H to R (indices 7 to 17) using merge_range
+        notes_col = 7  # Column H
+        notes_start_row = new_table_start + 1
+
+        ws2.write(notes_start_row, notes_col, "Notes:", note_title_fmt)
+
+        itc_notes_list = [
+            "1. 4A1 (Import of goods): Data populated from the IMPG sheet in GSTR 2B.",
+            "2. 4A2 (Import of Services): User to input.",
+            "3. 4A3 (Domestic Reverse Charge): Data populated from the reverse charge column of the B2B sheet in GSTR 2B.",
+            "4. 4A4 (ISD): Data populated from the ISD sheet in GSTR 2B.",
+            "5. 4A5 (Net ITC): Data populated from B2B and B2B-CDNR sheet in GSTR 2B without reverse charge.",
+            "6. 4B1 (Permanent Reversal): User to input.",
+            "7. 4B2 (Temporary Reverse): Data populated from the Not Matched line items.",
+            "8. 4D1 (Past Period ITC): Data populated from the Matched and Almost Matched line items for lines matching with past period GSTR 2B."
+        ]
+
+        for i, note in enumerate(itc_notes_list):
+            # Merge across ~11 columns to allow text to flow freely without widening Column H
+            ws2.merge_range(notes_start_row + 1 + i, notes_col, notes_start_row + 1 + i, notes_col + 10, note, note_text_fmt)
 
         # ==========================================
         # 2. RECONCILIATION SHEET

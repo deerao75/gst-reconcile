@@ -1180,6 +1180,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
     df_b2b_raw = load_sheet("B2B") if has_b2b else pd.DataFrame()
     df_cdnr_raw = load_sheet("B2B-CDNR") if has_cdnr else pd.DataFrame()
+    # Optional IMPG sheet used for 4A1 (Import of goods)
+    df_impg_raw = load_sheet("IMPG") if "IMPG" in sheet_names else pd.DataFrame()
 
     df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)
@@ -1248,7 +1250,14 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
     # ========== BUILD LOOKUPS FROM RAW DATA BEFORE ANY PROCESSING ==========
     # Calculate header offset for Excel row numbers
-    header_offset = 6 if gstr2b_format == "portal" else 1
+    # Calculate header offset for Excel row numbers
+    # Pandas uses 0-based row indices; the last header row index is max(header_rows)
+    # Excel row for pandas index i = i + (last_header_index + 2)
+    if isinstance(header_rows, (list, tuple)):
+        header_offset = max(header_rows) + 2
+    else:
+        # header_rows is an int (e.g. 0) -> last header index = header_rows
+        header_offset = header_rows + 2
 
     row_num_lookup = {}
     period_lookup = {}
@@ -1332,6 +1341,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
     # We pass a .copy() to apply_signs, ensuring the original df_b2b_raw and df_cdnr_raw are not modified.
     df_b2b_raw_signed = apply_signs(df_b2b_raw.copy(), note_type_col=note_type_2b)
     df_cdnr_raw_signed = apply_signs(df_cdnr_raw.copy(), note_type_col=note_type_2b)
+    # Signed copy for IMPG (if present) — used for 4A1
+    df_impg_raw_signed = apply_signs(df_impg_raw.copy(), note_type_col=None) if (df_impg_raw is not None and not df_impg_raw.empty) else pd.DataFrame()
     # --- END: THE FIX ---
 
     gst_pr = match_provided(df_pr_raw, gst_pr_sel) or ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
@@ -1345,6 +1356,27 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
     cgst_pr = match_provided(df_pr_raw, cgst_pr_sel) or ensure_col(df_pr_raw, cgst_pr_sel, CGST_CANDIDATES_PR)
     sgst_pr = match_provided(df_pr_raw, sgst_pr_sel) or ensure_col(df_pr_raw, sgst_pr_sel, SGST_CANDIDATES_PR)
     igst_pr = match_provided(df_pr_raw, igst_pr_sel) or ensure_col(df_pr_raw, igst_pr_sel, IGST_CANDIDATES_PR)
+
+    # ----------------- Build PR row number lookup -----------------
+    # NOTE: This lookup needs gst_pr and inv_pr to be known; they are selected above.
+    # Build the PR row lookup so we can show Excel row numbers for matched/almost matched items.
+    pr_row_num_lookup = {}
+    try:
+        pr_header_offset = 2  # PR sheet header is single row -> data starts at Excel row 2 => idx + 2
+        if df_pr_raw is not None and not df_pr_raw.empty and gst_pr and inv_pr:
+            for idx, row in df_pr_raw.iterrows():
+                gst = clean_gstin(row.get(gst_pr, ""))
+                inv = inv_basic(row.get(inv_pr, ""))
+                if gst and inv:
+                    key = (as_text(gst), as_text(inv))
+                    excel_row = idx + pr_header_offset
+                    pr_row_num_lookup.setdefault(key, []).append(excel_row)
+        # convert lists to comma-separated strings (iterate over a copy of keys)
+        for key in list(pr_row_num_lookup.keys()):
+            pr_row_num_lookup[key] = ", ".join(map(str, sorted(pr_row_num_lookup[key])))
+    except Exception:
+        pr_row_num_lookup = {}
+    # ----------------------------------------------------------------
 
     def optional_numeric_list(df_):
         res = []
@@ -1424,6 +1456,292 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         inv_type_2b=(inv_type_2b_b2b or inv_type_2b_cdnr)
     )
 
+    # ------------------ ITC COMPUTATION BY CODE ------------------
+    def sum_column(df, col):
+        if df is None or df.empty or not col:
+            return 0.0
+        if col not in df.columns:
+            return 0.0
+        try:
+            return float(df[col].astype(str).map(parse_amount).sum())
+        except Exception:
+            return 0.0
+
+    def pick_tax_cols_for_sheet(df):
+        igst_col = _find_optional_col(df, [IGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"igst|integrated") if df is not None else None)
+        cgst_col = _find_optional_col(df, [CGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"cgst|central") if df is not None else None)
+        sgst_col = _find_optional_col(df, [SGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"sgst|state|utgst") if df is not None else None)
+        return igst_col, cgst_col, sgst_col
+
+    # 4A1 -> integrated tax from IMPG sheet (Import of goods)
+    impg_igst_col, impg_cgst_col, impg_sgst_col = pick_tax_cols_for_sheet(df_impg_raw)
+    val_4a1_igst = sum_column(df_impg_raw_signed, impg_igst_col)
+
+    # 4A2, 4A3, 4A4 default to zero unless IMPS/RC/ISD parsing is added later
+    val_4a2_igst = 0.0
+    val_4a3_igst = 0.0
+    val_4a4_igst = 0.0
+
+    # 4A5 = (B2B signed totals) - (CDNR signed totals) for each tax type
+    b2b_igst_col, b2b_cgst_col, b2b_sgst_col = pick_tax_cols_for_sheet(df_b2b_raw)
+    cdnr_igst_col, cdnr_cgst_col, cdnr_sgst_col = pick_tax_cols_for_sheet(df_cdnr_raw)
+
+    b2b_igst_sum = sum_column(df_b2b_raw_signed, b2b_igst_col)
+    b2b_cgst_sum = sum_column(df_b2b_raw_signed, b2b_cgst_col)
+    b2b_sgst_sum = sum_column(df_b2b_raw_signed, b2b_sgst_col)
+
+    cdnr_igst_sum = sum_column(df_cdnr_raw_signed, cdnr_igst_col)
+    cdnr_cgst_sum = sum_column(df_cdnr_raw_signed, cdnr_cgst_col)
+    cdnr_sgst_sum = sum_column(df_cdnr_raw_signed, cdnr_sgst_col)
+
+    val_4a5_igst = b2b_igst_sum - cdnr_igst_sum
+    val_4a5_cgst = b2b_cgst_sum - cdnr_cgst_sum
+    val_4a5_sgst = b2b_sgst_sum - cdnr_sgst_sum
+
+    # Build row dicts per code
+    row_4a1 = {"integrated": val_4a1_igst, "central": 0.0, "state": 0.0, "cess": 0.0}
+    row_4a2 = {"integrated": val_4a2_igst, "central": 0.0, "state": 0.0, "cess": 0.0}
+    row_4a3 = {"integrated": val_4a3_igst, "central": 0.0, "state": 0.0, "cess": 0.0}
+    row_4a4 = {"integrated": val_4a4_igst, "central": 0.0, "state": 0.0, "cess": 0.0}
+    row_4a5 = {"integrated": val_4a5_igst, "central": val_4a5_cgst, "state": val_4a5_sgst, "cess": 0.0}
+
+    # 4B1 left zero (no explicit source for 4B1)
+    row_4b1 = {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0}
+
+    # ---------------- Robust 4B2 computation (REPLACEMENT: simple, source-sheet-based sums) ----------------
+    # Build a mapping from (GST, INV) -> Mapping so we can check original rows
+    recon_lookup = {}
+    try:
+        for _, r in combined_df.iterrows():
+            k = (as_text(r.get("_GST_KEY", "")), as_text(r.get("_INV_KEY", "")))
+            recon_lookup[k] = (r.get("Mapping", ""), r.get("Remarks", ""), r.get("Reason", ""))
+    except Exception:
+        recon_lookup = {}
+
+    # Helper to pick tax columns from a raw df (signed)
+    try:
+        # pick_tax_cols_for_sheet returns (igst_col, cgst_col, sgst_col)
+        b2b_igst_col, b2b_cgst_col, b2b_sgst_col = pick_tax_cols_for_sheet(df_b2b_raw_signed) if ( 'df_b2b_raw_signed' in locals() and df_b2b_raw_signed is not None and not df_b2b_raw_signed.empty) else (None, None, None)
+        cdnr_igst_col, cdnr_cgst_col, cdnr_sgst_col = pick_tax_cols_for_sheet(df_cdnr_raw_signed) if ( 'df_cdnr_raw_signed' in locals() and df_cdnr_raw_signed is not None and not df_cdnr_raw_signed.empty) else (None, None, None)
+    except Exception:
+        b2b_igst_col = b2b_cgst_col = b2b_sgst_col = None
+        cdnr_igst_col = cdnr_cgst_col = cdnr_sgst_col = None
+
+    def _sum_not_matched_in_sheet(df_signed, gst_col, inv_col, tax_col):
+        """
+        Sum numeric values from df_signed[tax_col] for rows whose (gst,inv) maps to Mapping == 'Not Matched'.
+        Uses clean_gstin and inv_basic to build keys and parse_amount to safely parse numbers.
+        """
+        if df_signed is None or df_signed.empty or not gst_col or not inv_col or not tax_col:
+            return 0.0
+        if gst_col not in df_signed.columns or inv_col not in df_signed.columns or tax_col not in df_signed.columns:
+            return 0.0
+        total = 0.0
+        for _, row in df_signed.iterrows():
+            try:
+                gst = clean_gstin(row.get(gst_col, ""))
+                inv = inv_basic(row.get(inv_col, ""))
+                if not gst or not inv:
+                    continue
+                key = (as_text(gst), as_text(inv))
+                mapping = recon_lookup.get(key, ("",))[0]
+                if isinstance(mapping, str) and mapping.strip().lower() == "not matched":
+                    # parse the tax cell robustly
+                    total += parse_amount(row.get(tax_col, 0))
+            except Exception:
+                # ignore row-level errors and continue
+                continue
+        return float(total)
+
+    # Compute B2B sums for each tax (only Not Matched rows) and CDNR sums likewise, then subtract
+    try:
+        # B2B sums
+        b2b_not_matched_igst = _sum_not_matched_in_sheet(df_b2b_raw_signed, gst_2b_b2b, inv_2b_b2b, b2b_igst_col)
+        b2b_not_matched_cgst = _sum_not_matched_in_sheet(df_b2b_raw_signed, gst_2b_b2b, inv_2b_b2b, b2b_cgst_col)
+        b2b_not_matched_sgst = _sum_not_matched_in_sheet(df_b2b_raw_signed, gst_2b_b2b, inv_2b_b2b, b2b_sgst_col)
+
+        # CDNR sums (note-based)
+        cdnr_not_matched_igst = _sum_not_matched_in_sheet(df_cdnr_raw_signed, gst_2b_cdnr, note_2b_cdnr, cdnr_igst_col)
+        cdnr_not_matched_cgst = _sum_not_matched_in_sheet(df_cdnr_raw_signed, gst_2b_cdnr, note_2b_cdnr, cdnr_cgst_col)
+        cdnr_not_matched_sgst = _sum_not_matched_in_sheet(df_cdnr_raw_signed, gst_2b_cdnr, note_2b_cdnr, cdnr_sgst_col)
+    except Exception:
+        b2b_not_matched_igst = b2b_not_matched_cgst = b2b_not_matched_sgst = 0.0
+        cdnr_not_matched_igst = cdnr_not_matched_cgst = cdnr_not_matched_sgst = 0.0
+
+    # final 4B2 values = sum(NotMatched in B2B) - sum(NotMatched in B2B-CDNR)
+    val_4b2_igst = float(b2b_not_matched_igst - cdnr_not_matched_igst)
+    val_4b2_cgst = float(b2b_not_matched_cgst - cdnr_not_matched_cgst)
+    val_4b2_sgst = float(b2b_not_matched_sgst - cdnr_not_matched_sgst)
+
+    row_4b2 = {"integrated": val_4b2_igst, "central": val_4b2_cgst, "state": val_4b2_sgst, "cess": 0.0}
+    # ---------------- end replacement for 4B2 computation ----------------
+
+
+
+    def sum_rows(rows, key):
+        return sum((r.get(key, 0.0) for r in rows), 0.0)
+
+    row_4a = {
+        "integrated": sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], "integrated"),
+        "central":    sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], "central"),
+        "state":      sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], "state"),
+        "cess":       sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], "cess"),
+    }
+
+    row_4b = {
+        "integrated": sum_rows([row_4b1, row_4b2], "integrated"),
+        "central":    sum_rows([row_4b1, row_4b2], "central"),
+        "state":      sum_rows([row_4b1, row_4b2], "state"),
+        "cess":       sum_rows([row_4b1, row_4b2], "cess"),
+    }
+
+    row_4c = {
+        "integrated": row_4a["integrated"] - row_4b["integrated"],
+        "central":    row_4a["central"] - row_4b["central"],
+        "state":      row_4a["state"] - row_4b["state"],
+        "cess":       row_4a["cess"] - row_4b["cess"],
+    }
+
+    # ---- START: Compute 4D1 (robust, with logging & fallback column detection) ----
+    try:
+        # Defensive retrieval of comments DataFrames
+        _b2b_comm = locals().get('gstr2b_comments')
+        if not isinstance(_b2b_comm, pd.DataFrame):
+            _b2b_comm = pd.DataFrame()
+        else:
+            _b2b_comm = _b2b_comm.copy()
+
+        _cdnr_comm = locals().get('gstr2b_cdnr_comments')
+        if not isinstance(_cdnr_comm, pd.DataFrame):
+            _cdnr_comm = pd.DataFrame()
+        else:
+            _cdnr_comm = _cdnr_comm.copy()
+
+        combined_comments = pd.concat([_b2b_comm, _cdnr_comm], ignore_index=True, sort=False)
+
+        # Keep only Matched / Almost Matched rows
+        if "Mapping" in combined_comments.columns:
+            matched_df = combined_comments[combined_comments["Mapping"].astype(str).isin(["Matched", "Almost Matched"])].copy()
+        else:
+            matched_df = pd.DataFrame(columns=combined_comments.columns)
+
+        # Determine latest Tax Period robustly (accept "%b %Y" or values parseable by _parse_month_year_string)
+        latest_period = None
+        def _period_to_key(v):
+            # return (year, month, formatted_str) or None
+            if not v or pd.isna(v):
+                return None
+            s = str(v).strip()
+            try:
+                dt = datetime.strptime(s, "%b %Y")
+                return (dt.year, dt.month, dt.strftime("%b %Y"))
+            except Exception:
+                pass
+            # try the helper that returns (year, month)
+            try:
+                ym = _parse_month_year_string(s)
+                if ym:
+                    y, m = ym
+                    return (int(y), int(m), datetime(year=int(y), month=int(m), day=1).strftime("%b %Y"))
+            except Exception:
+                pass
+            return None
+
+        parsed_periods = []
+        if "Tax Period" in matched_df.columns and not matched_df["Tax Period"].dropna().empty:
+            uniq = matched_df["Tax Period"].dropna().astype(str).map(str.strip).unique().tolist()
+            for v in uniq:
+                k = _period_to_key(v)
+                if k:
+                    parsed_periods.append(k)
+        if parsed_periods:
+            parsed_periods.sort()
+            latest_period = parsed_periods[-1][2]  # formatted like "Sep 2025"
+
+        # Detect IGST/CGST/SGST columns: prefer pick_tax_cols_for_sheet, fallback to substring matching
+        igst_col, cgst_col, sgst_col = pick_tax_cols_for_sheet(combined_comments)
+
+        def _fallback_find_col(df, candidates):
+            if df is None or df.empty:
+                return None
+            cand_norms = [_norm(c) for c in candidates]
+            for col in df.columns:
+                n = _norm(col)
+                for cn in cand_norms:
+                    if cn == n or cn in n or n in cn:
+                        return col
+            # last-resort: any column name containing 'igst'/'cgst'/'sgst'
+            for col in df.columns:
+                n = col.lower()
+                for keyword in ["igst", "integrated", "cgst", "central", "sgst", "state", "utgst"]:
+                    if keyword in n:
+                        # Return first matching; caller will filter by specific candidate group
+                        return col
+            return None
+
+        if not igst_col:
+            igst_col = _fallback_find_col(combined_comments, IGST_CANDIDATES_2B)
+        if not cgst_col:
+            cgst_col = _fallback_find_col(combined_comments, CGST_CANDIDATES_2B)
+        if not sgst_col:
+            sgst_col = _fallback_find_col(combined_comments, SGST_CANDIDATES_2B)
+
+        def _sum_tax(df, col):
+            if df is None or df.empty or not col or col not in df.columns:
+                return 0.0
+            try:
+                return float(df[col].astype(str).map(parse_amount).sum())
+            except Exception:
+                return 0.0
+
+        # Prepare filtered DataFrame (exclude rows with latest_period)
+        if matched_df.empty:
+            filtered = matched_df
+        else:
+            if latest_period:
+                keep_mask = matched_df["Tax Period"].astype(str).map(lambda x: str(x).strip() != latest_period)
+                filtered = matched_df[keep_mask].copy()
+            else:
+                filtered = matched_df.copy()
+
+        _igt = _sum_tax(filtered, igst_col)
+        _cgt = _sum_tax(filtered, cgst_col)
+        _sgt = _sum_tax(filtered, sgst_col)
+
+        # Log diagnostic info so you can inspect worker logs
+        try:
+            app.logger.info("4D1 DIAG matched_rows=%d filtered_rows=%d latest_period=%s igst_col=%s cgst_col=%s sgst_col=%s sums=(%0.2f,%0.2f,%0.2f)",
+                            int(len(matched_df)), int(len(filtered)), str(latest_period), str(igst_col), str(cgst_col), str(sgst_col),
+                            float(_igt), float(_cgt), float(_sgt))
+        except Exception:
+            pass
+
+        row_4d1 = {"integrated": float(_igt), "central": float(_cgt), "state": float(_sgt), "cess": 0.0}
+    except Exception as _e:
+        try:
+            app.logger.exception("4D1 compute error: %s", _e)
+        except Exception:
+            pass
+        row_4d1 = {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0}
+    # ---- END: Compute 4D1 ----
+
+    itc_values_by_code = {
+        "4A":  row_4a,
+        "4A1": row_4a1,
+        "4A2": row_4a2,
+        "4A3": row_4a3,
+        "4A4": row_4a4,
+        "4A5": row_4a5,
+        "4B":  row_4b,
+        "4B1": row_4b1,
+        "4B2": row_4b2,
+        "4C":  row_4c,
+        "4D":  {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0},
+        "4D1": row_4d1,
+        "4D2": {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0},
+    }
+    # ------------------ END ITC COMPUTATION ------------------
+
     recon_lookup = {}
     for _, row in combined_df.iterrows():
         key = (as_text(row.get("_GST_KEY", "")), as_text(row.get("_INV_KEY", "")))
@@ -1441,29 +1759,136 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
             # Get row number and period from lookup
             row_num_2b = ""
-            period_2b = ""
+
 
             # Only populate for Matched and Almost Matched
             if mapping in ["Matched", "Almost Matched"]:
                 row_num_2b = row_num_lookup.get(key, "")
-                period_2b = period_lookup.get(key, "")
 
-            return pd.Series([mapping, remarks, reason, row_num_2b, period_2b])
 
-        pr_comments[["Mapping", "Remarks", "Reason", "Row number in 2B", "2B Month"]] = pr_comments.apply(get_recon_status, axis=1)
+            return pd.Series([mapping, remarks, reason, row_num_2b])
+
+        pr_comments[["Mapping", "Remarks", "Reason", "Row number in 2B"]] = pr_comments.apply(get_recon_status, axis=1)
         pr_comments.drop(columns=["_GST_KEY", "_INV_KEY"], inplace=True)
     else:
         pr_comments["Mapping"] = ""
         pr_comments["Remarks"] = ""
         pr_comments["Reason"] = ""
         pr_comments["Row number in 2B"] = ""
-        pr_comments["2B Month"] = ""
 
-    # --- START: Logic for GSTR 2B-Comments sheet (B2B-only, keep raw uploaded B2B and append mapping cols) ---
-    # Build gstr2b_comments using only the uploaded B2B sheet (ignore B2B-CDNR for now)
+    # --------- REPLACEMENT: Build B2B / CDNR comments and add Tax Period column (FINAL INTEGRATED) ---------
+    # This block builds gstr2b_comments and gstr2b_cdnr_comments, fills Mapping/Remarks/Reason,
+    # computes "Tax Period" with robust parsing and fallbacks, and ensures the column is kept
+    # when writing the "GSTR 2B B2B - Comments" and "GSTR 2B CDNR - Comments" sheets.
+
+    from collections import Counter
+
+    def _parse_month_year_string(s):
+        """Return (year, month) or None for common month-year representations."""
+        if s is None:
+            return None
+        s = str(s).strip()
+        if not s:
+            return None
+        s_clean = re.sub(r'[^A-Za-z0-9\s\/\-\:]', ' ', s).strip()
+        fmts = ["%b %Y", "%B %Y", "%m/%Y", "%m-%Y", "%Y-%m", "%b-%Y", "%B-%Y", "%m %Y", "%Y %b", "%Y %B"]
+        for fmt in fmts:
+            try:
+                dt = datetime.strptime(s_clean, fmt)
+                return (dt.year, dt.month)
+            except Exception:
+                pass
+        m = re.search(r'(\d{2})\s*[/\-]?\s*(\d{4})$', s)
+        if m:
+            mo = int(m.group(1)); yr = int(m.group(2))
+            if 1 <= mo <= 12:
+                return (yr, mo)
+        m2 = re.search(r'(\d{4})\s*[/\-]?\s*(\d{2})$', s)
+        if m2:
+            yr = int(m2.group(1)); mo = int(m2.group(2))
+            if 1 <= mo <= 12:
+                return (yr, mo)
+        try:
+            dt = pd.to_datetime(s, errors='coerce')
+            if not pd.isna(dt):
+                return (int(dt.year), int(dt.month))
+        except Exception:
+            pass
+        return None
+
+    def _tax_period_from_gstr1_cell(v):
+        """
+        Returns formatted Tax Period like 'Sep 2025' or ''.
+        Rules:
+          - If v parses as a date (parse_date_cell) -> if day >= 12 => month of that date, else previous month.
+          - Else if v looks like a month-year string -> use that month/year.
+          - Else return empty string.
+        """
+        # 1) try date parse (day-sensitive)
+        d = parse_date_cell(v)
+        if d:
+            if d.day >= 12:
+                y, m = d.year, d.month
+            else:
+                if d.month == 1:
+                    y, m = d.year - 1, 12
+                else:
+                    y, m = d.year, d.month - 1
+            return datetime(year=y, month=m, day=1).strftime("%b %Y")
+
+        # 2) try month-year parse
+        my = _parse_month_year_string(v)
+        if my:
+            y, m = my
+            return datetime(year=y, month=m, day=1).strftime("%b %Y")
+
+        return ""
+
+
+    def _find_exact_filing_date_col(df):
+        """Return column name matching 'GSTR-1/IFF/GSTR-5 Filing Date' (soft-normalized), else None."""
+        if df is None or df.empty:
+            return None
+        target_norm = re.sub(r'[^a-z0-9]', '', "GSTR-1/IFF/GSTR-5 Filing Date".lower())
+        for c in df.columns:
+            if _norm(c) == target_norm:
+                return c
+        # Also allow soft matches that contain the key words (fallback)
+        for c in df.columns:
+            cn = _softnorm(c)
+            if "gstr" in cn and ("filing" in cn or "filing date" in cn or "filingdate" in cn or "iff" in cn or "gstr-5" in cn):
+                return c
+        return None
+
+    def _tax_period_from_date_cell_dayrule(v):
+        """Return 'Mon YYYY' or '' from an invoice/note date value using day>=12 rule."""
+        d = parse_date_cell(v)
+        if not d:
+            return ""
+        if d.day >= 12:
+            y, m = d.year, d.month
+        else:
+            if d.month == 1:
+                y, m = d.year - 1, 12
+            else:
+                y, m = d.year, d.month - 1
+        return datetime(year=y, month=m, day=1).strftime("%b %Y")
+
+    def _fill_tax_period_with_modal(df, candidate_periods, target_col):
+        """Fill blanks in df[target_col] with modal period if modal is meaningful. Return number filled."""
+        non_empty = [p for p in candidate_periods if p]
+        if not non_empty:
+            return 0
+        modal, count = Counter(non_empty).most_common(1)[0]
+        if count >= 2 or (count / max(1, len(candidate_periods)) >= 0.20):
+            blanks = df[target_col].astype(str).map(lambda x: not bool(str(x).strip()))
+            df.loc[blanks, target_col] = modal
+            return int(blanks.sum())
+        return 0
+
+    # Build gstr2b_comments (B2B)
     try:
         if df_b2b_raw is not None and not df_b2b_raw.empty:
-            # use the uploaded B2B sheet as-is (already normalized earlier by load_sheet)
             gstr2b_comments = df_b2b_raw.copy()
         else:
             gstr2b_comments = pd.DataFrame()
@@ -1471,40 +1896,38 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         gstr2b_comments = pd.DataFrame()
 
     def _get_b2b_row_status(row):
-        # If gst/invoice columns were not detected, return empty
         if not gst_2b_b2b or not inv_2b_b2b:
-            return pd.Series(["", "", ""])
-        # If the expected columns are not present on this row, return empty
+            return pd.Series(["", "", "", ""])
         if gst_2b_b2b not in row or inv_2b_b2b not in row:
-            return pd.Series(["", "", ""])
+            return pd.Series(["", "", "", ""])
         try:
             gst_val = clean_gstin(row[gst_2b_b2b])
             inv_val = inv_basic(row[inv_2b_b2b])
             key = (as_text(gst_val), as_text(inv_val))
-            return pd.Series(recon_lookup.get(key, ("", "", "")))
+            mapping, remarks, reason = recon_lookup.get(key, ("", "", ""))
+            pr_row = ""
+            if mapping in ["Matched", "Almost Matched"]:
+                pr_row = pr_row_num_lookup.get(key, "")
+            return pd.Series([mapping, remarks, reason, pr_row])
         except Exception:
-            return pd.Series(["", "", ""])
+            return pd.Series(["", "", "", ""])
 
-    # Ensure Mapping/Remarks/Reason columns are appended and populated per B2B row
-    if not gstr2b_comments.empty:
-        for _col in ["Mapping", "Remarks", "Reason"]:
+    # Ensure mapping/comment columns exist
+    if gstr2b_comments is not None:
+        for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]:
             if _col not in gstr2b_comments.columns:
                 gstr2b_comments[_col] = ""
+
+    if not gstr2b_comments.empty:
         try:
-            gstr2b_comments[["Mapping", "Remarks", "Reason"]] = gstr2b_comments.apply(_get_b2b_row_status, axis=1)
+            gstr2b_comments[["Mapping", "Remarks", "Reason", "Row Number in PR"]] = gstr2b_comments.apply(_get_b2b_row_status, axis=1)
         except Exception:
-            # fallback: ensure columns exist if apply fails
             gstr2b_comments["Mapping"] = gstr2b_comments.get("Mapping", "")
             gstr2b_comments["Remarks"] = gstr2b_comments.get("Remarks", "")
             gstr2b_comments["Reason"] = gstr2b_comments.get("Reason", "")
-    else:
-        # create the three columns so the final workbook has headers even if there are no B2B rows
-        gstr2b_comments["Mapping"] = ""
-        gstr2b_comments["Remarks"] = ""
-        gstr2b_comments["Reason"] = ""
-    # --- END: Logic for GSTR 2B-Comments sheet (B2B-only) ---
+            gstr2b_comments["Row Number in PR"] = gstr2b_comments.get("Row Number in PR", "")
 
-    # --- START: Logic for GSTR 2B CDNR - Comments sheet (B2B-CDNR only) ---
+    # Build gstr2b_cdnr_comments (CDNR)
     try:
         if df_cdnr_raw is not None and not df_cdnr_raw.empty:
             gstr2b_cdnr_comments = df_cdnr_raw.copy()
@@ -1514,38 +1937,108 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         gstr2b_cdnr_comments = pd.DataFrame()
 
     def _get_cdnr_row_status(row):
-        # If gst/note columns were not detected, return empty
         if not gst_2b_cdnr or not note_2b_cdnr:
-            return pd.Series(["", "", ""])
-        # If the expected columns are not present on this row, return empty
+            return pd.Series(["", "", "", ""])
         if gst_2b_cdnr not in row or note_2b_cdnr not in row:
-            return pd.Series(["", "", ""])
+            return pd.Series(["", "", "", ""])
         try:
             gst_val = clean_gstin(row[gst_2b_cdnr])
             note_val = inv_basic(row[note_2b_cdnr])
             key = (as_text(gst_val), as_text(note_val))
-            return pd.Series(recon_lookup.get(key, ("", "", "")))
+            mapping, remarks, reason = recon_lookup.get(key, ("", "", ""))
+            pr_row = ""
+            if mapping in ["Matched", "Almost Matched"]:
+                pr_row = pr_row_num_lookup.get(key, "")
+            return pd.Series([mapping, remarks, reason, pr_row])
         except Exception:
-            return pd.Series(["", "", ""])
+            return pd.Series(["", "", "", ""])
 
-    # Ensure Mapping/Remarks/Reason columns are appended and populated per CDNR row
-    if not gstr2b_cdnr_comments.empty:
-        for _col in ["Mapping", "Remarks", "Reason"]:
+    if gstr2b_cdnr_comments is not None:
+        for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]:
             if _col not in gstr2b_cdnr_comments.columns:
                 gstr2b_cdnr_comments[_col] = ""
+
+    if not gstr2b_cdnr_comments.empty:
         try:
-            gstr2b_cdnr_comments[["Mapping", "Remarks", "Reason"]] = gstr2b_cdnr_comments.apply(_get_cdnr_row_status, axis=1)
+            gstr2b_cdnr_comments[["Mapping", "Remarks", "Reason", "Row Number in PR"]] = gstr2b_cdnr_comments.apply(_get_cdnr_row_status, axis=1)
         except Exception:
-            # fallback: ensure columns exist if apply fails
             gstr2b_cdnr_comments["Mapping"] = gstr2b_cdnr_comments.get("Mapping", "")
             gstr2b_cdnr_comments["Remarks"] = gstr2b_cdnr_comments.get("Remarks", "")
             gstr2b_cdnr_comments["Reason"] = gstr2b_cdnr_comments.get("Reason", "")
-    else:
-        # create the three columns so the final workbook has headers even if there are no CDNR rows
-        gstr2b_cdnr_comments["Mapping"] = ""
-        gstr2b_cdnr_comments["Remarks"] = ""
-        gstr2b_cdnr_comments["Reason"] = ""
-    # --- END: Logic for GSTR 2B CDNR - Comments sheet ---
+            gstr2b_cdnr_comments["Row Number in PR"] = gstr2b_cdnr_comments.get("Row Number in PR", "")
+
+    # --------- REPLACEMENT: Strict Filing-Date based Tax Period assignment ---------
+    # Prefer an exact filing-date column "GSTR-1/IFF/GSTR-5 Filing Date" (case-insensitive).
+    # For each row: parse as date using parse_date_cell; if day >= 12 -> Tax Period = month(year) of date;
+    # else Tax Period = previous month (wrap year when month == Jan).
+
+    def _tax_period_from_filing_date_cell(v):
+        """Return 'Mon YYYY' or '' applying exact day>=12 rule on a parsed date."""
+        d = parse_date_cell(v)
+        if not d:
+            return ""
+        if d.day >= 12:
+            y, m = d.year, d.month
+        else:
+            if d.month == 1:
+                y, m = d.year - 1, 12
+            else:
+                y, m = d.year, d.month - 1
+        return datetime(year=y, month=m, day=1).strftime("%b %Y")
+
+    # B2B: prefer exact filing-date column
+    filing_col_b2b = _find_exact_filing_date_col(gstr2b_comments if 'gstr2b_comments' in locals() else pd.DataFrame())
+    # If not found, fall back to earlier detected gstr1_period_col_b2b (if present)
+    if not filing_col_b2b:
+        filing_col_b2b = locals().get("gstr1_period_col_b2b", None)
+
+    # Ensure Tax Period column exists
+    if 'gstr2b_comments' not in locals() or gstr2b_comments is None:
+        gstr2b_comments = pd.DataFrame()
+    if "Tax Period" not in gstr2b_comments.columns:
+        gstr2b_comments["Tax Period"] = ""
+
+    if not gstr2b_comments.empty:
+        if filing_col_b2b and filing_col_b2b in gstr2b_comments.columns:
+            # Use filing date column strictly (vectorized map)
+            try:
+                gstr2b_comments["Tax Period"] = gstr2b_comments[filing_col_b2b].map(_tax_period_from_filing_date_cell)
+            except Exception:
+                gstr2b_comments["Tax Period"] = gstr2b_comments.apply(lambda r: _tax_period_from_filing_date_cell(r.get(filing_col_b2b, None)), axis=1)
+        else:
+            # Fallback to invoice/date-based rule (if available) so nothing regresses
+            if 'date_2b_b2b' in locals() and date_2b_b2b and date_2b_b2b in gstr2b_comments.columns:
+                try:
+                    gstr2b_comments["Tax Period"] = gstr2b_comments[date_2b_b2b].map(_tax_period_from_filing_date_cell)
+                except Exception:
+                    gstr2b_comments["Tax Period"] = gstr2b_comments.apply(lambda r: _tax_period_from_filing_date_cell(r.get(date_2b_b2b, None)), axis=1)
+            # else leave as-is (modal/fallback could already have filled it)
+
+    # CDNR: prefer exact filing-date column
+    filing_col_cdnr = _find_exact_filing_date_col(gstr2b_cdnr_comments if 'gstr2b_cdnr_comments' in locals() else pd.DataFrame())
+    if not filing_col_cdnr:
+        filing_col_cdnr = locals().get("gstr1_period_col_cdnr", None)
+
+    if 'gstr2b_cdnr_comments' not in locals() or gstr2b_cdnr_comments is None:
+        gstr2b_cdnr_comments = pd.DataFrame()
+    if "Tax Period" not in gstr2b_cdnr_comments.columns:
+        gstr2b_cdnr_comments["Tax Period"] = ""
+
+    if not gstr2b_cdnr_comments.empty:
+        if filing_col_cdnr and filing_col_cdnr in gstr2b_cdnr_comments.columns:
+            try:
+                gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments[filing_col_cdnr].map(_tax_period_from_filing_date_cell)
+            except Exception:
+                gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments.apply(lambda r: _tax_period_from_filing_date_cell(r.get(filing_col_cdnr, None)), axis=1)
+        else:
+            if 'notedate_2b_cdnr' in locals() and notedate_2b_cdnr and notedate_2b_cdnr in gstr2b_cdnr_comments.columns:
+                try:
+                    gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments[notedate_2b_cdnr].map(_tax_period_from_filing_date_cell)
+                except Exception:
+                    gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments.apply(lambda r: _tax_period_from_filing_date_cell(r.get(notedate_2b_cdnr, None)), axis=1)
+            # else leave as-is
+
+    # --------- END: Strict Filing-Date based Tax Period assignment ---------
 
     cols = list(combined_df.columns)
     if "Invoice Type" in cols:
@@ -1581,16 +2074,48 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         wb = writer.book
         header_fmt = wb.add_format({"bold": True})
 
+        # Format to highlight Mapping / Remarks / Reason columns (pale yellow)
+        comment_highlight_fmt = wb.add_format({"bg_color": "#FFF2CC", "align": "left", "valign": "vcenter"})
+
+        def _highlight_columns(ws, df, col_names, fmt, include_header: bool = True):
+            """
+            Apply a fill format to the given column names on worksheet ws for DataFrame df.
+            Uses conditional_format with type 'no_errors' so it colors the whole column range safely.
+            - ws: xlsxwriter worksheet
+            - df: pandas DataFrame used to determine column indices and number of rows
+            - col_names: list of column names to highlight (strings)
+            - fmt: xlsxwriter format object
+            - include_header: if True, include header row in formatting (row 0)
+            """
+            try:
+                if df is None:
+                    return
+                nrows = len(df)  # number of data rows
+                # header row = 0, data rows occupy rows 1..nrows (use nrows==0 -> last_row = 0)
+                last_row = nrows
+                start_row = 0 if include_header else 1
+                for col_name in col_names:
+                    if col_name in df.columns:
+                        col_idx = int(df.columns.get_loc(col_name))
+                        # apply format safely to entire used range for that column
+                        ws.conditional_format(start_row, col_idx, last_row, col_idx, {"type": "no_errors", "format": fmt})
+            except Exception:
+                # non-fatal: if anything fails we don't want to stop writing the workbook
+                pass
+
         combined_df.to_excel(writer, index=False, sheet_name="Reconciliation")
         ws = writer.sheets["Reconciliation"]
         ws.freeze_panes(1, 0)
         ws.autofilter(0, 0, len(combined_df), max(0, combined_df.shape[1] - 1))
         ws.set_row(0, None, header_fmt)
         _autosize_ws(ws, combined_df)
+        _highlight_columns(ws, combined_df, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
 
         ws2 = writer.book.add_worksheet("Dashboard")
         writer.sheets["Dashboard"] = ws2
         hdr_bold = header_fmt
+        heading_fmt = wb.add_format({"bold": True, "align": "center", "valign": "vcenter"})
+        header_center = wb.add_format({"bold": True, "align": "center", "valign": "vcenter"})
         num_fmt  = wb.add_format({"num_format": "#,##0.00"})
 
         def _sum_component(status, col_name):
@@ -1615,67 +2140,131 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         statuses = ["Matched", "Almost Matched", "Not Matched", None]
         rowlabels = ["CGST", "SGST", "IGST", "Total"]
 
-        ws2.write(0, 0, "Status", hdr_bold)
+        # Write a heading for the current table
+        total_cols = 1 + len(statuses) * 2
+        last_col_idx = total_cols - 1
+        ws2.merge_range(0, 0, 0, last_col_idx, "Summary - GSTR 2B vs. Purchase Register Reconciliation", heading_fmt)
+
+        # Table top header starts two rows below the heading to leave a blank row
+        top_row = 2
+        sub_row = top_row + 1
+        data_start = top_row + 2
+
+        # Top header (Status + merged status blocks)
+        ws2.write(top_row, 0, "Status", hdr_bold)
         col = 1
         for st in statuses:
             title = "Total" if st is None else st
-            ws2.merge_range(0, col, 0, col+1, title, hdr_bold)
+            ws2.merge_range(top_row, col, top_row, col+1, title, hdr_bold)
             col += 2
 
-        ws2.write(1, 0, "Report", hdr_bold)
+        # Sub-header (Report / PR vs GSTR 2B)
+        ws2.write(sub_row, 0, "Report", hdr_bold)
         col = 1
         for _ in statuses:
-            ws2.write(1, col,     "PR",      hdr_bold)
-            ws2.write(1, col + 1, "GSTR 2B", hdr_bold)
+            ws2.write(sub_row, col,     "PR",      hdr_bold)
+            ws2.write(sub_row, col + 1, "GSTR 2B", hdr_bold)
             col += 2
 
-        for r, label in enumerate(rowlabels, start=2):
+        # Data rows
+        for r, label in enumerate(rowlabels, start=data_start):
             ws2.write(r, 0, label, hdr_bold)
 
         col = 1
         for st in statuses:
             pr_vals, b2_vals = _block_vals(st)
-            for r, v in enumerate(pr_vals, start=2):
+            for r, v in enumerate(pr_vals, start=data_start):
                 ws2.write_number(r, col, v, num_fmt)
-            for r, v in enumerate(b2_vals, start=2):
+            for r, v in enumerate(b2_vals, start=data_start):
                 ws2.write_number(r, col+1, v, num_fmt)
             col += 2
 
-        ws2.freeze_panes(2, 0)
-        for c in range(0, 1 + len(statuses)*2):
+        # Freeze panes so header + subheader stay visible
+        ws2.freeze_panes(data_start, 0)
+
+        # Set widths for the columns used by the dashboard table
+        for c in range(0, total_cols):
             ws2.set_column(c, c, 14)
         ws2.set_column(0, 0, 12)
 
+        # After the end of the existing table, leave a couple of rows and add the new ITC table
+        end_of_table_row = data_start + len(rowlabels) - 1  # last data row index
+        # leave two blank rows
+        new_table_start = end_of_table_row + 3  # two blank rows in between
+
+        # ITC for GSTR 3B title
+        ws2.merge_range(new_table_start, 0, new_table_start, 5, "ITC for GSTR 3B", heading_fmt)
+
+        # ITC table headers
+        itc_headers = ["Details", "Code", "Integrated Tax (₹)", "Central Tax (₹)", "State/UT Tax (₹)", "CESS (₹)"]
+        for ci, h in enumerate(itc_headers):
+            ws2.write(new_table_start + 1, ci, h, header_center)
+
+        # ITC table rows (values left blank for now)
+        itc_rows = [
+            ("(A) ITC Available (whether in full or part)", "4A"),
+            ("(1) Import of goods", "4A1"),
+            ("(2) Import of services", "4A2"),
+            ("(3) Inward supplies liable to reverse charge (other than 1 & 2 above)", "4A3"),
+            ("(4) Inward supplies from ISD", "4A4"),
+            ("(5) All other ITC", "4A5"),
+            ("(B) ITC Reversed", "4B"),
+            ("(1) As per rules 38,42 & 43 of CGST Rules and section 17(5)", "4B1"),
+            ("(2) Others", "4B2"),
+            ("(C) Net ITC Available (A) - (B)", "4C"),
+            ("(D) Other Details", "4D"),
+            ("(1) ITC reclaimed which was reversed under Table 4(B)(2) in earlier tax period", "4D1"),
+            ("(2) Ineligible ITC under section 16(4) & ITC restricted due to PoS rules", "4D2"),
+        ]
+
+        row_idx = new_table_start + 2
+        for details, code in itc_rows:
+            ws2.write(row_idx, 0, details)
+            ws2.write(row_idx, 1, code)
+            v = itc_values_by_code.get(code, {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0})
+            # Write numbers (use num_fmt already defined)
+            ws2.write_number(row_idx, 2, float(v.get("integrated", 0.0)), num_fmt)
+            ws2.write_number(row_idx, 3, float(v.get("central", 0.0)), num_fmt)
+            ws2.write_number(row_idx, 4, float(v.get("state", 0.0)), num_fmt)
+            ws2.write_number(row_idx, 5, float(v.get("cess", 0.0)), num_fmt)
+            row_idx += 1
+
+        # Optionally set column widths for ITC table columns
+        for c in range(0, 6):
+            ws2.set_column(c, c, 28 if c == 0 else 14)
+
+        # Write PR comments sheet
         pr_comments.to_excel(writer, index=False, sheet_name="PR - Comments")
         ws3 = writer.sheets["PR - Comments"]
         ws3.freeze_panes(1, 0)
         ws3.autofilter(0, 0, len(pr_comments), max(0, pr_comments.shape[1] - 1))
         ws3.set_row(0, None, header_fmt)
         _autosize_ws(ws3, pr_comments)
+        _highlight_columns(ws3, pr_comments, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
 
         # --- WRITE the uploaded B2B sheet into output workbook as "GSTR 2B B2B - Comments" ---
         try:
             if 'df_b2b_raw' in locals() and df_b2b_raw is not None and not df_b2b_raw.empty:
                 # Write the raw uploaded B2B sheet as-is
                 # NOTE: Changed per request: write the comments sheet named "GSTR 2B B2B - Comments"
-                # Use gstr2b_comments (built earlier) and ensure Mapping/Remarks/Reason are last three columns.
+                # Use gstr2b_comments (built earlier) and ensure Mapping/Remarks/Reason/Row Number in PR are last columns.
                 to_write = gstr2b_comments.copy() if 'gstr2b_comments' in locals() else df_b2b_raw.copy()
 
                 # Ensure mapping columns exist
-                for _col in ["Mapping", "Remarks", "Reason"]:
+                for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR"]:
                     if _col not in to_write.columns:
                         to_write[_col] = ""
 
-                # Preserve original B2B column order (as present in df_b2b_raw) and append Mapping/Remarks/Reason at the end
+                # Preserve original B2B column order (as present in df_b2b_raw) and append Mapping/Remarks/Reason/Row Number in PR at the end
                 if 'df_b2b_raw' in locals() and df_b2b_raw is not None:
                     orig_cols = [c for c in df_b2b_raw.columns if c in to_write.columns]
                     # If for some reason df_b2b_raw columns are not present in to_write, fall back to to_write's columns excluding mapping cols
                     if not orig_cols:
-                        orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason"]]
+                        orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
                 else:
-                    orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason"]]
+                    orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
 
-                final_cols = orig_cols + [c for c in ["Mapping", "Remarks", "Reason"] if c in to_write.columns]
+                final_cols = orig_cols + [c for c in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"] if c in to_write.columns]
                 # Reindex to the final order (this will drop any columns not in final_cols)
                 to_write = to_write.reindex(columns=final_cols)
 
@@ -1685,9 +2274,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws4.autofilter(0, 0, len(to_write), max(0, to_write.shape[1] - 1))
                 ws4.set_row(0, None, header_fmt)
                 _autosize_ws(ws4, to_write)
+                _highlight_columns(ws4, to_write, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
             else:
-                # Ensure a B2B sheet still exists (empty with header row) — renamed sheet and include Mapping cols
-                empty_df = pd.DataFrame(columns=["Mapping", "Remarks", "Reason"])
+                # Ensure a B2B sheet still exists (empty with header row) — renamed sheet and include mapping cols
+                empty_df = pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"])
                 empty_df.to_excel(writer, index=False, sheet_name="GSTR 2B B2B - Comments")
                 ws4 = writer.sheets["GSTR 2B B2B - Comments"]
                 ws4.set_row(0, None, header_fmt)
@@ -1700,19 +2290,19 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 to_write_cd = gstr2b_cdnr_comments.copy() if 'gstr2b_cdnr_comments' in locals() else df_cdnr_raw.copy()
 
                 # Ensure mapping columns exist
-                for _col in ["Mapping", "Remarks", "Reason"]:
+                for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]:
                     if _col not in to_write_cd.columns:
                         to_write_cd[_col] = ""
 
-                # Preserve original CDNR column order (as present in df_cdnr_raw) and append Mapping/Remarks/Reason at the end
+                # Preserve original CDNR column order (as present in df_cdnr_raw) and append Mapping/Remarks/Reason/Row Number in PR at the end
                 if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None:
                     orig_cd_cols = [c for c in df_cdnr_raw.columns if c in to_write_cd.columns]
                     if not orig_cd_cols:
-                        orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason"]]
+                        orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
                 else:
-                    orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason"]]
+                    orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
 
-                final_cd_cols = orig_cd_cols + [c for c in ["Mapping", "Remarks", "Reason"] if c in to_write_cd.columns]
+                final_cd_cols = orig_cd_cols + [c for c in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"] if c in to_write_cd.columns]
                 to_write_cd = to_write_cd.reindex(columns=final_cd_cols)
 
                 to_write_cd.to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")
@@ -1721,9 +2311,10 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws5.autofilter(0, 0, len(to_write_cd), max(0, to_write_cd.shape[1] - 1))
                 ws5.set_row(0, None, header_fmt)
                 _autosize_ws(ws5, to_write_cd)
+                _highlight_columns(ws5, to_write_cd, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
             else:
                 # Create empty CDNR comments sheet with mapping columns
-                empty_cd_df = pd.DataFrame(columns=["Mapping", "Remarks", "Reason"])
+                empty_cd_df = pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"])
                 empty_cd_df.to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")
                 ws5 = writer.sheets["GSTR 2B CDNR - Comments"]
                 ws5.set_row(0, None, header_fmt)

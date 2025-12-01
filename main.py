@@ -1178,13 +1178,105 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         df["_SOURCE_SHEET"] = name
         return df
 
+    # 1. Define Helper to Filter Imports/Overseas
+    # Returns: (filtered_df, captured_imports_df)
+    def _filter_imports_overseas(df):
+        if df is None or df.empty: return df, pd.DataFrame()
+
+        type_candidates = [
+            "purchase type", "transaction type", "nature of transaction",
+            "type of purchase", "supply type", "nature", "voucher type", "details"
+        ]
+        target_col = _find_optional_col(df, [type_candidates])
+
+        # Fallback search
+        if not target_col:
+            for c in df.columns:
+                cn = str(c).lower()
+                if "type" in cn and ("purchase" in cn or "trans" in cn or "nature" in cn):
+                    target_col = c
+                    break
+
+        if target_col:
+            exclude_terms = ["import of goods", "imported goods", "import", "overseas"]
+            def is_excluded(val):
+                s = str(val).lower().strip()
+                if not s: return False
+                for term in exclude_terms:
+                    if term in s: return True
+                return False
+
+            mask_exclude = df[target_col].apply(is_excluded)
+
+            # Split the data
+            df_imports = df[mask_exclude].copy() # Captured rows
+            df_clean = df[~mask_exclude].copy()  # Remaining rows
+
+            return df_clean, df_imports
+
+        return df, pd.DataFrame()
+
+    # 2. Load and Filter Sheets
     df_b2b_raw = load_sheet("B2B") if has_b2b else pd.DataFrame()
+
+    # FIX: Capture imports from B2B (Row 1 Format) separately
+    df_b2b_raw, df_b2b_imports = _filter_imports_overseas(df_b2b_raw)
+
     df_cdnr_raw = load_sheet("B2B-CDNR") if has_cdnr else pd.DataFrame()
-    # Optional IMPG sheet used for 4A1 (Import of goods)
+
     df_impg_raw = load_sheet("IMPG") if "IMPG" in sheet_names else pd.DataFrame()
 
     df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)
+
+    # Filter PR (we just discard PR imports, so we use underscore _)
+    df_pr_raw, _ = _filter_imports_overseas(df_pr_raw)
+
+    # 3. CRITICAL: Force Negative Signs on CDNR Immediately
+    def _force_negative_cdnr(df):
+        if df is None or df.empty: return df
+        df = df.copy()
+
+        target_cols = []
+        for c in df.columns:
+            cn = str(c).lower()
+
+            keywords = [
+                "tax", "value", "amount", "cess",
+                "igst", "cgst", "sgst",
+                "integrated", "central", "state"
+            ]
+
+            if any(x in cn for x in keywords):
+                # FIX: "Integrated" contains the word "rate".
+                # We must NOT exclude it. Only exclude "rate" if it is NOT "integrated".
+                is_rate_col = ("rate" in cn) and ("integrated" not in cn)
+
+                if not is_rate_col:
+                    target_cols.append(c)
+
+        # Function to flip sign
+        def flip_sign_row(row, col_name):
+            val = parse_amount(row[col_name])
+            # Check ENTIRE row text for 'Debit' or 'Dr' to keep it positive
+            row_text = " ".join(row.astype(str)).lower()
+            if "debit" in row_text or " dr " in row_text or " dr." in row_text:
+                return abs(val)
+            else:
+                return -abs(val)
+
+        for col in target_cols:
+            df[col] = df.apply(lambda r: flip_sign_row(r, col), axis=1)
+
+        return df
+
+    if not df_cdnr_raw.empty:
+        df_cdnr_raw = _force_negative_cdnr(df_cdnr_raw)
+
+    # 4. Create 'Signed' variables immediately
+    df_b2b_raw_signed = df_b2b_raw.copy()
+    df_cdnr_raw_signed = df_cdnr_raw.copy() # This is now already negative
+    df_impg_raw_signed = df_impg_raw.copy()
 
     def match_provided(df: pd.DataFrame, provided: str) -> Optional[str]:
         if not provided:
@@ -1312,37 +1404,64 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
             return df
         df = df.copy()
 
+        # Helper to normalize note type text
         def normalize_note_type(val: str) -> str:
             s = as_text(val).lower()
             if re.search(r'\bdebit\b|\bdn\b|\bdr\b', s):  return "debit"
-            if re.search(r'\bcredit\b|\bcn\b|\bcr\b', s): return "credit"
-            return ""
+            return "credit" # Default to credit for normalization context
 
+        # 1. Determine the Note Type for every row
         if note_type_col and note_type_col in df.columns:
+            # Trust the specific column if provided
             df["_NOTE_TYPE"] = df[note_type_col].map(normalize_note_type)
         else:
+            # Fallback inference
             def infer(row):
-                note = as_text(row.get(_pick_best_note_col(df, None) or "", ""))
-                s = note.lower()
-                if "dn" in s or "debit" in s or re.search(r'\bdr\b', s): return "debit"
-                if "cn" in s or "credit" in s or re.search(r'\bcr\b', s): return "credit"
-                return "credit" if row.get("_SOURCE_SHEET") == "B2B-CDNR" else "invoice"
+                # STRICT RULE: If this row comes from the CDNR sheet, it is CREDIT (Negative)
+                # unless we find "debit" in a known note-type-like column.
+                if row.get("_SOURCE_SHEET") == "B2B-CDNR":
+                    # Check if there's any hint of "Debit" in any likely column
+                    # (We check the note number or similar fields just in case)
+                    for col in row.index:
+                        val = str(row[col]).lower()
+                        if "debit" in val or "dr" in val:
+                             # Be careful not to match "Address" or random text,
+                             # but if the user hasn't mapped a note type col, this is rare.
+                             # Safest bet for CDNR sheet is Credit.
+                             pass
+                    return "credit"
+
+                # For B2B sheet, it's an invoice (positive)
+                return "invoice"
+
             df["_NOTE_TYPE"] = df.apply(infer, axis=1)
 
+        # 2. FORCE OVERRIDE for CDNR Sheet
+        # If the row is from B2B-CDNR, force it to be 'credit' (negative)
+        # UNLESS it was explicitly detected as 'debit' above.
+        if "_SOURCE_SHEET" in df.columns:
+            # Everything in CDNR is credit unless explicitly debit
+            mask_cdnr = (df["_SOURCE_SHEET"] == "B2B-CDNR") & (df["_NOTE_TYPE"] != "debit")
+            df.loc[mask_cdnr, "_NOTE_TYPE"] = "credit"
+
+        # 3. Apply the Signs
         numeric_cols = [c for c in (
             CGST_CANDIDATES_2B + SGST_CANDIDATES_2B + IGST_CANDIDATES_2B +
             TAXABLE_CANDIDATES_2B + TOTAL_TAX_CANDIDATES_2B + INVOICE_VALUE_CANDIDATES_2B + CESS_CANDIDATES_2B
         ) if c in df.columns]
+
         for col in numeric_cols:
-            df[col] = df.apply(lambda r: -parse_amount(r[col]) if r["_NOTE_TYPE"] == "credit" else parse_amount(r[col]), axis=1)
+            # ABS ensure we start positive, then flip to negative if Credit
+            df[col] = df.apply(lambda r: -abs(parse_amount(r[col])) if r["_NOTE_TYPE"] == "credit" else abs(parse_amount(r[col])), axis=1)
+
         return df
 
     # --- START: THE FIX ---
     # We pass a .copy() to apply_signs, ensuring the original df_b2b_raw and df_cdnr_raw are not modified.
-    df_b2b_raw_signed = apply_signs(df_b2b_raw.copy(), note_type_col=note_type_2b)
-    df_cdnr_raw_signed = apply_signs(df_cdnr_raw.copy(), note_type_col=note_type_2b)
+    #df_b2b_raw_signed = apply_signs(df_b2b_raw.copy(), note_type_col=note_type_2b)
+    #df_cdnr_raw_signed = apply_signs(df_cdnr_raw.copy(), note_type_col=note_type_2b)
     # Signed copy for IMPG (if present) — used for 4A1
-    df_impg_raw_signed = apply_signs(df_impg_raw.copy(), note_type_col=None) if (df_impg_raw is not None and not df_impg_raw.empty) else pd.DataFrame()
+    #df_impg_raw_signed = apply_signs(df_impg_raw.copy(), note_type_col=None) if (df_impg_raw is not None and not df_impg_raw.empty) else pd.DataFrame()
     # --- END: THE FIX ---
 
     gst_pr = match_provided(df_pr_raw, gst_pr_sel) or ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
@@ -1473,9 +1592,24 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         sgst_col = _find_optional_col(df, [SGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"sgst|state|utgst") if df is not None else None)
         return igst_col, cgst_col, sgst_col
 
-    # 4A1 -> integrated tax from IMPG sheet (Import of goods)
+    # 4A1 Calculation
+    # Logic:
+    # - GST Portal Format: Comes from IMPG sheet (df_b2b_imports will be empty).
+    # - Row 1 Format: Comes from captured B2B imports (IMPG sheet will be empty).
+
+    # A. From IMPG Sheet
     impg_igst_col, impg_cgst_col, impg_sgst_col = pick_tax_cols_for_sheet(df_impg_raw)
-    val_4a1_igst = sum_column(df_impg_raw_signed, impg_igst_col)
+    val_4a1_impg = sum_column(df_impg_raw_signed, impg_igst_col)
+
+    # B. From B2B Import Lines (Row 1 Format)
+    val_4a1_flat = 0.0
+    if 'df_b2b_imports' in locals() and not df_b2b_imports.empty:
+        # Identify IGST column in the imports dataframe
+        imp_igst, _, _ = pick_tax_cols_for_sheet(df_b2b_imports)
+        val_4a1_flat = sum_column(df_b2b_imports, imp_igst)
+
+    # Final 4A1 Value
+    val_4a1_igst = val_4a1_impg + val_4a1_flat
 
     # ---- 4A3: Inward supplies liable to reverse charge (B2B) ----
     val_4a3_igst = val_4a3_cgst = val_4a3_sgst = 0.0
@@ -1523,9 +1657,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
     cdnr_sgst_sum = sum_column(df_cdnr_raw_signed, cdnr_sgst_col)
 
     # Net 4A5
-    val_4a5_igst = (b2b_igst_sum - cdnr_igst_sum) - val_4a3_igst
-    val_4a5_cgst = (b2b_cgst_sum - cdnr_cgst_sum) - val_4a3_cgst
-    val_4a5_sgst = (b2b_sgst_sum - cdnr_sgst_sum) - val_4a3_sgst
+    val_4a5_igst = (b2b_igst_sum + cdnr_igst_sum) - val_4a3_igst
+    val_4a5_cgst = (b2b_cgst_sum + cdnr_cgst_sum) - val_4a3_cgst
+    val_4a5_sgst = (b2b_sgst_sum + cdnr_sgst_sum) - val_4a3_sgst
 
     # Build row dicts per code
     row_4a1 = {"integrated": val_4a1_igst, "central": 0.0, "state": 0.0, "cess": 0.0} # defined earlier
@@ -1598,9 +1732,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         cdnr_not_matched_igst = cdnr_not_matched_cgst = cdnr_not_matched_sgst = 0.0
 
     # final 4B2 values = sum(NotMatched in B2B) - sum(NotMatched in B2B-CDNR)
-    val_4b2_igst = float(b2b_not_matched_igst - cdnr_not_matched_igst)
-    val_4b2_cgst = float(b2b_not_matched_cgst - cdnr_not_matched_cgst)
-    val_4b2_sgst = float(b2b_not_matched_sgst - cdnr_not_matched_sgst)
+    val_4b2_igst = float(b2b_not_matched_igst + cdnr_not_matched_igst)
+    val_4b2_cgst = float(b2b_not_matched_cgst + cdnr_not_matched_cgst)
+    val_4b2_sgst = float(b2b_not_matched_sgst + cdnr_not_matched_sgst)
 
     row_4b2 = {"integrated": val_4b2_igst, "central": val_4b2_cgst, "state": val_4b2_sgst, "cess": 0.0}
     # ---------------- end replacement for 4B2 computation ----------------
@@ -1643,15 +1777,21 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         # 2. Helper to get Tax Period datetime from date cells
         def _get_tp(val):
-            d = parse_date_cell(val)
-            if not d: return None
-            # Rule: if filing date >= 12th, it's current month, else previous
-            if d.day >= 12:
-                return datetime(d.year, d.month, 1)
-            else:
-                # Move to previous month safely
-                first = datetime(d.year, d.month, 1)
-                return first - timedelta(days=1)
+            try:
+                d = parse_date_cell(val)
+                if not d: return None
+                # Force integer conversion for safety
+                y, m = int(d.year), int(d.month)
+
+                # Rule: if filing date >= 12th, it's current month, else previous
+                if d.day >= 12:
+                    return datetime(y, m, 1)
+                else:
+                    # Move to previous month safely
+                    first = datetime(y, m, 1)
+                    return first - timedelta(days=1)
+            except Exception:
+                return None
 
         # 3. Function to extract valid rows (Tax Period, IGST, CGST, SGST) from a raw df
         def _extract_rows(df_raw, gst_col, inv_col, date_col, ig_col, cg_col, sg_col):
@@ -1723,9 +1863,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
             sum_cdnr_s += r['s']
 
         # 9. Net Value = B2B - CDNR
-        final_i = sum_b2b_i - sum_cdnr_i
-        final_c = sum_b2b_c - sum_cdnr_c
-        final_s = sum_b2b_s - sum_cdnr_s
+        final_i = sum_b2b_i + sum_cdnr_i
+        final_c = sum_b2b_c + sum_cdnr_c
+        final_s = sum_b2b_s + sum_cdnr_s
 
         row_4d1 = {"integrated": final_i, "central": final_c, "state": final_s, "cess": 0.0}
 
@@ -1856,18 +1996,37 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
 
     def _find_exact_filing_date_col(df):
-        """Return column name matching 'GSTR-1/IFF/GSTR-5 Filing Date' (soft-normalized), else None."""
+        """
+        Return column name matching 'GSTR-1/IFF/GSTR-5 Filing Date' or variations.
+        Prioritizes columns explicitly containing 'date' to avoid picking 'Filing Period'.
+        """
         if df is None or df.empty:
             return None
-        target_norm = re.sub(r'[^a-z0-9]', '', "GSTR-1/IFF/GSTR-5 Filing Date".lower())
+
+        # 1. Strict Check: Normalize and look for specific known headers
+        # We want to match "filing date", avoiding "filing period" or "filing status"
+        target_keywords = ["filing date", "filingdate", "date of filing"]
+
         for c in df.columns:
-            if _norm(c) == target_norm:
-                return c
-        # Also allow soft matches that contain the key words (fallback)
+            cn = str(c).lower()
+            # Clean up delimiters to handle GSTR-1/IFF vs GSTR 1 IFF, etc.
+            cn_clean = re.sub(r'[^a-z0-9]', '', cn)
+
+            # Check if it looks like a filing date column
+            # It MUST contain "date" and ("filing" or "gstr1" or "iff")
+            if "date" in cn_clean:
+                if "filing" in cn_clean or "gstr1" in cn_clean or "iff" in cn_clean:
+                    # Explicitly EXCLUDE "period" to prevent grabbing "Filing Period"
+                    if "period" not in cn_clean:
+                        return c
+
+        # 2. Fallback: If no explicit "filing date" found, check for generic "Filing Date"
+        # (Only if it doesn't contain "period")
         for c in df.columns:
-            cn = _softnorm(c)
-            if "gstr" in cn and ("filing" in cn or "filing date" in cn or "filingdate" in cn or "iff" in cn or "gstr-5" in cn):
+            cn = str(c).lower()
+            if "filing" in cn and "date" in cn and "period" not in cn:
                 return c
+
         return None
 
     def _tax_period_from_date_cell_dayrule(v):
@@ -1984,17 +2143,25 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
     def _tax_period_from_filing_date_cell(v):
         """Return 'Mon YYYY' or '' applying exact day>=12 rule on a parsed date."""
-        d = parse_date_cell(v)
-        if not d:
-            return ""
-        if d.day >= 12:
-            y, m = d.year, d.month
-        else:
-            if d.month == 1:
-                y, m = d.year - 1, 12
+        try:
+            d = parse_date_cell(v)
+            if not d:
+                return ""
+
+            # Force integers
+            y, m = int(d.year), int(d.month)
+
+            if d.day >= 12:
+                pass # y, m are correct
             else:
-                y, m = d.year, d.month - 1
-        return datetime(year=y, month=m, day=1).strftime("%b %Y")
+                if m == 1:
+                    y, m = y - 1, 12
+                else:
+                    y, m = y, m - 1
+
+            return datetime(year=y, month=m, day=1).strftime("%b %Y")
+        except Exception:
+            return ""
 
     # B2B: prefer exact filing-date column
     filing_col_b2b = _find_exact_filing_date_col(gstr2b_comments if 'gstr2b_comments' in locals() else pd.DataFrame())
@@ -2184,7 +2351,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         end_of_table_row = data_start + len(rowlabels) - 1
         new_table_start = end_of_table_row + 3
 
-        ws2.merge_range(new_table_start, 0, new_table_start, 5, "ITC for GSTR 3B", dash_title_fmt)
+        ws2.merge_range(new_table_start, 0, new_table_start, 5, "ITC for GSTR 3B (for reference purposes only)", dash_title_fmt)
 
         itc_headers = ["Details", "Code", "Integrated Tax (₹)", "Central Tax (₹)", "State/UT Tax (₹)", "CESS (₹)"]
         for ci, h in enumerate(itc_headers):

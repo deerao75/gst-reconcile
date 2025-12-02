@@ -168,6 +168,22 @@
       </div>
       {% endif %}
     </div>
+        <!-- ... end of tab-content div ... -->
+    </div>
+
+    <!-- NEW: Return Period Input (Styled to match your page) -->
+    <div class="verify-box" style="margin-top: 1.5rem; border-color: #ff7b00;">
+      <h3>Reconciliation Settings</h3>
+      <label for="return_period">Select Return Month:
+        <input type="month" id="return_period" name="return_period" required
+               style="display: block; margin-top: 8px; padding: 0.6rem; border-radius: 8px; border: 1px solid #ccc; font-size: 1rem; background: #fafafa; max-width: 300px;">
+      </label>
+      <p class="muted" style="margin-top: 5px; font-size: 0.9rem; color: #666;">
+        This is used to calculate Past Period ITC (4D1). Any matched invoice dated <em>before</em> this month will be added to 4D1.
+      </p>
+    </div>
+    <!-- End of New Input -->
+
 
     <div class="verify-actions">
       <button type="submit" class="btn-main" id="submitBtn">
@@ -175,6 +191,7 @@
       </button>
       <a href="{{ url_for('index') }}" class="btn-secondary">Start Over</a>
     </div>
+
   </form>
 
   <!-- Progress Overlay -->

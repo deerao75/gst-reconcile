@@ -1151,7 +1151,7 @@ def _append_if_missing(target_list: List[str], candidates: List[Optional[str]]) 
 
 # main.py
 
-def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format: str,
+def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format: str, return_period_str: str,
                                  # B2B (invoice-based)
                                  inv_2b_b2b_sel: str, gst_2b_b2b_sel: str, date_2b_b2b_sel: str, cgst_2b_b2b_sel: str, sgst_2b_b2b_sel: str, igst_2b_b2b_sel: str,
                                  # CDNR (note-based)
@@ -1168,11 +1168,23 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
     header_rows = [4, 5] if gstr2b_format == "portal" else 0
 
+    # Helper to load Excel using Calamine (Fast & Low Memory)
     def load_sheet(name):
-        df = pd.read_excel(tmp2b_path, sheet_name=name, header=header_rows)
+        try:
+            # Try using calamine first for speed/memory
+            df = pd.read_excel(tmp2b_path, sheet_name=name, header=header_rows, engine="calamine")
+        except Exception:
+            # Fallback to openpyxl if calamine fails (e.g. .xls vs .xlsx issues)
+            df = pd.read_excel(tmp2b_path, sheet_name=name, header=header_rows, engine="openpyxl")
+
         df = df.dropna(how="all")
         if df.empty:
             return df
+
+        # Convert all columns to string to save memory/avoid type errors
+        # (Pandas "string[pyarrow]" is more memory efficient than object, but "str" is safer for now)
+        df = df.astype(str)
+
         df.columns = flatten_columns(df.columns)
         df, _ = normalize_columns(df)
         df["_SOURCE_SHEET"] = name
@@ -1216,20 +1228,23 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         return df, pd.DataFrame()
 
-    # 2. Load and Filter Sheets
+     # 2. Load and Filter Sheets
     df_b2b_raw = load_sheet("B2B") if has_b2b else pd.DataFrame()
-
-    # FIX: Capture imports from B2B (Row 1 Format) separately
     df_b2b_raw, df_b2b_imports = _filter_imports_overseas(df_b2b_raw)
 
     df_cdnr_raw = load_sheet("B2B-CDNR") if has_cdnr else pd.DataFrame()
-
     df_impg_raw = load_sheet("IMPG") if "IMPG" in sheet_names else pd.DataFrame()
 
-    df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
-    df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)
+    # Load PR using calamine as well
+    try:
+        df_pr_raw = pd.read_excel(tmppr_path, engine="calamine")
+    except:
+        df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
 
-    # Filter PR (we just discard PR imports, so we use underscore _)
+    # Convert to string immediately to prevent object overhead
+    df_pr_raw = df_pr_raw.astype(str)
+
+    df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)
     df_pr_raw, _ = _filter_imports_overseas(df_pr_raw)
 
     # 3. CRITICAL: Force Negative Signs on CDNR Immediately
@@ -2501,7 +2516,7 @@ from rq import get_current_job
 import tempfile, os, time
 from concurrent.futures import ThreadPoolExecutor
 
-def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal") -> dict:
+def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal", return_period: str = None) -> dict:
     def _mark(pct, msg):
         j = get_current_job()
         if j:
@@ -2528,11 +2543,11 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
         _mark(30, "Reconciling")
         x = selections
 
-        # --- START: THIS IS THE FIX ---
-        # Pass the gstr2b_format argument down to the reconciliation pipeline.
+        # Pass return_period_str to the pipeline
         blob = _run_reconciliation_pipeline(
             tmp2b_path=in2b, tmppr_path=inpr,
-            gstr2b_format=gstr2b_format,  # Pass it here
+            gstr2b_format=gstr2b_format,
+            return_period_str=return_period,
             # B2B
             inv_2b_b2b_sel=x.get("inv_2b_b2b",""), gst_2b_b2b_sel=x.get("gst_2b_b2b",""), date_2b_b2b_sel=x.get("date_2b_b2b",""), cgst_2b_b2b_sel=x.get("cgst_2b_b2b",""), sgst_2b_b2b_sel=x.get("sgst_2b_b2b",""), igst_2b_b2b_sel=x.get("igst_2b_b2b",""),
             # CDNR
@@ -2540,7 +2555,6 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
             # PR
             inv_pr_sel=x.get("inv_pr",""), gst_pr_sel=x.get("gst_pr",""), date_pr_sel=x.get("date_pr",""), cgst_pr_sel=x.get("cgst_pr",""), sgst_pr_sel=x.get("sgst_pr",""), igst_pr_sel=x.get("igst_pr","")
         )
-        # --- END: THIS IS THE FIX ---
 
         _mark(82, f"Reconcile+write took {time.time()-t0:.1f}s")
 
@@ -2561,10 +2575,10 @@ def reconcile_confirm():
         flash("Upload session expired. Please re-upload the files.")
         return redirect(url_for("index"))
 
-    # --- START: THIS IS THE FIX ---
-    # Get the format choice from the session here, within the request context.
     gstr2b_format = session.get("gstr2b_format", "portal")
-    # --- END: THIS IS THE FIX ---
+
+    # NEW: Capture the Return Period input
+    return_period = request.form.get("return_period")
 
     sel = {
         # B2B (invoice-based)
@@ -2599,23 +2613,18 @@ def reconcile_confirm():
         except Exception:
             pass
         session.pop("tmp2b", None); session.pop("tmppr", None)
-        # --- START: THIS IS THE FIX ---
-        # Clean up the format from the session as well.
         session.pop("gstr2b_format", None)
-        # --- END: THIS IS THE FIX ---
 
     user_id = request.form.get("user_id", "anon")
 
-    # --- START: THIS IS THE FIX ---
-    # Pass gstr2b_format as a new argument to the background job.
+    # Pass return_period to the worker
     job = q.enqueue(
         "main.process_reconcile",
-        drive_id_2b, drive_id_pr, sel, user_id, gstr2b_format, # Pass it here
+        drive_id_2b, drive_id_pr, sel, user_id, gstr2b_format, return_period,
         job_timeout=-1,
         result_ttl=86400,
         failure_ttl=86400
     )
-    # --- END: THIS IS THE FIX ---
 
     return render_template("progress.html", job_id=job.id)
 

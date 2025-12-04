@@ -121,6 +121,13 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 SERVICE_ACCOUNT_FILE = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'cred.json')
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', None)
 
+
+def get_credentials():
+    """Creates credentials from the service account file."""
+    return service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
+
 def _drive_service():
     """Get the Drive service resource with retries."""
     creds = get_credentials()

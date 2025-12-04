@@ -122,11 +122,19 @@ SERVICE_ACCOUNT_FILE = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', 'cred.js
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', None)
 
 def _drive_service():
-    path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or SERVICE_ACCOUNT_FILE
-    if not path or not os.path.exists(path):
-        raise RuntimeError(f"GOOGLE_APPLICATION_CREDENTIALS missing or not found: {path}")
-    creds = service_account.Credentials.from_service_account_file(path, scopes=SCOPES)
-    return build('drive', 'v3', credentials=creds, cache_discovery=False)
+    """Get the Drive service resource with retries."""
+    creds = get_credentials()
+
+    for attempt in range(1, 4):
+        try:
+            # Try to build the service (this refreshes the token if needed)
+            service = build('drive', 'v3', credentials=creds)
+            return service
+        except Exception as e:
+            print(f"[Error] Failed to connect to Drive API (Attempt {attempt}/3). Retrying in 2s... Error: {e}")
+            time.sleep(2)
+
+    raise Exception("Failed to connect to Google Drive API after 3 attempts.")
 
 import time # Add this at the top of main.py if missing
 
@@ -160,17 +168,35 @@ def upload_to_drive(local_path: str, filename: str) -> str:
             # Wait 5 seconds before trying again
             time.sleep(5)
 
-def download_from_drive(file_id: str, local_path: str):
-    service = _drive_service()
-    request = service.files().get_media(
-        fileId=file_id,
-        supportsAllDrives=True
-    )
-    with io.FileIO(local_path, 'wb') as fh:
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
+def download_from_drive(file_id, destination_path):
+    """Downloads a file from Google Drive with 3 retries on failure."""
+    creds = get_credentials()
+    service = build('drive', 'v3', credentials=creds)
+    request = service.files().get_media(fileId=file_id)
+
+    last_exception = None
+
+    for attempt in range(1, 4):
+        try:
+            fh = io.FileIO(destination_path, 'wb')
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+                # Optional: print(f"Download {int(status.progress() * 100)}%.")
+
+            # If we get here, it worked!
+            fh.close()
+            return
+
+        except Exception as e:
+            last_exception = e
+            print(f"[Error] Download failed (Attempt {attempt}/3). Retrying in 5s... Error: {e}")
+            time.sleep(5)
+
+    # If we exit the loop, all 3 attempts failed
+    print(f"[Fatal] Could not download file {file_id} after 3 attempts.")
+    raise last_exception
 
 # -------------------- Column candidates --------------------
 # GSTR-2B (flattened) candidates

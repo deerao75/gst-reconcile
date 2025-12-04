@@ -128,19 +128,37 @@ def _drive_service():
     creds = service_account.Credentials.from_service_account_file(path, scopes=SCOPES)
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
+import time # Add this at the top of main.py if missing
+
 def upload_to_drive(local_path: str, filename: str) -> str:
     service = _drive_service()
     metadata = {'name': filename}
     if DRIVE_FOLDER_ID:
         metadata['parents'] = [DRIVE_FOLDER_ID]
-    media = MediaFileUpload(local_path, resumable=True)
-    file = service.files().create(
-        body=metadata,
-        media_body=media,
-        fields='id',
-        supportsAllDrives=True
-    ).execute()
-    return file.get('id')
+
+    # Retry up to 3 times
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Re-create the media object for each attempt to reset the stream
+            media = MediaFileUpload(local_path, resumable=True)
+
+            file = service.files().create(
+                body=metadata,
+                media_body=media,
+                fields='id',
+                supportsAllDrives=True
+            ).execute()
+
+            return file.get('id')
+
+        except Exception as e:
+            app.logger.warning(f"Upload failed (Attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                # If this was the last attempt, raise the error to fail the job
+                raise e
+            # Wait 5 seconds before trying again
+            time.sleep(5)
 
 def download_from_drive(file_id: str, local_path: str):
     service = _drive_service()

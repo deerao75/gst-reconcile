@@ -48,7 +48,7 @@
     }
     .nav-menu a,
     .nav-menu form button {
-      color: #000; /* 🔹 Changed to black */
+      color: #000;
       text-decoration: none;
       background: none;
       border: none;
@@ -65,26 +65,46 @@
       margin: 24px auto;
       padding: 0 24px;
     }
+
+    /* --- UPDATED FOOTER STYLES --- */
     .footer {
-      text-align: center;
-      padding: 20px;
+      /* Force vertical stacking and centering */
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 30px 20px;
       background: #f8f9fa;
       border-top: 1px solid #e0e0e0;
-      color: #666;
-      font-size: 0.9rem;
       margin-top: 40px;
+      text-align: center;
     }
-    .footer .muted {
-      color: #888;
+    .footer-links {
+      display: block;
+      width: 100%;
+      margin-bottom: 12px; /* Gap between lines */
+      color: #000;
     }
-    .footer a {
-      color: #ffad33;
+    .footer-links a {
+      color: #000; /* Dark Black Links */
       text-decoration: none;
       cursor: pointer;
+      margin: 0 5px;
+      font-weight: 600;
     }
-    .footer a:hover {
+    .footer-links a:hover {
         text-decoration: underline;
     }
+    .footer-copyright {
+      display: block;
+      width: 100%;
+      color: #666;
+      font-size: 0.9rem;
+    }
+    .footer-copyright .muted {
+      color: #888;
+    }
+
     .subscription-plans {
       display: flex;
       gap: 24px;
@@ -183,7 +203,7 @@
       margin: auto;
       padding: 25px 30px;
       border-radius: 8px;
-      max-width: 800px; /* Increased from 650px */
+      max-width: 800px;
       width: 90%;
       position: relative;
       text-align: left;
@@ -197,8 +217,18 @@
         font-size: 1.1rem;
         font-weight: 600;
     }
+    /* Ensure paragraphs are justified as requested */
     .modal-content p {
         text-align: justify;
+        margin-bottom: 1em;
+        line-height: 1.5;
+    }
+    .modal-content ul {
+        margin-bottom: 1em;
+        padding-left: 20px;
+    }
+    .modal-content li {
+        margin-bottom: 0.5em;
     }
     .modal-content strong {
         font-weight: bold;
@@ -266,11 +296,17 @@
   </main>
 
   <footer class="footer">
-    <div>
-      © {{ 2025 }} AcerGST • <span class="muted">All Rights Reserved</span> •
-      <a href="mailto:info@acertax.com" class="muted">info@acertax.com</a> |
-      <a id="terms-link">Terms & Conditions</a> |
-      <a id="refund-link">Refund Policy</a>
+    <!-- Line 1: Links in Dark Black -->
+    <div class="footer-links">
+      <a id="terms-link">Terms and Conditions</a> |
+      <a id="refund-link">Cancellation & Refunds</a> |
+      <a id="shipping-link">Shipping</a> |
+      <a id="privacy-link">Privacy</a> |
+      <a id="contact-link">Contact us</a>
+    </div>
+    <!-- Line 2: Copyright -->
+    <div class="footer-copyright">
+      © 2025 AcerGST • <span class="muted">All Rights Reserved</span>
     </div>
   </footer>
 
@@ -279,22 +315,31 @@
     <div class="modal-content">
       <span class="modal-close-btn" data-modal-id="terms-modal">&times;</span>
       <h2>Terms and Conditions for use of Acer Nova</h2>
-      <p><small>Last Updated: 12-11-2025</small></p>
+      <p><small>Last Updated: Dec 4th 2025</small></p>
 
-      <h3>1. Acceptance of Terms</h3>
-      <p>By uploading files, creating an account, or otherwise using the Service, you acknowledge that you have read, understood, and agree to be bound by these Terms and our Privacy Policy.</p>
+      <p>For the purpose of these Terms and Conditions, The term "we", "us", "our" used anywhere on this page shall mean <strong>Acer Tax & Corporate Services LLP</strong>, whose registered/operational office is No. 81, 8th Main, 8th Cross Serpentine Road, Kumara Park West, Bangalore Bengaluru Karnataka 560020 Seshadripuram KARNATAKA 560020. "you", “your”, "user", “visitor” shall mean any natural or legal person who is visiting our website and/or agreed to purchase from us.</p>
 
-      <h3>2. Service Availability and "As-Is" Basis</h3>
-      <p>The Service is provided on an "as-is" and "as-available" basis. We do not guarantee that the Service will be uninterrupted, timely, secure, or error-free. We will not be liable for any modification, suspension, or discontinuance of the Service.</p>
+      <p>Your use of the website and/or purchase from us are governed by following Terms and Conditions:</p>
 
-      <h3>3. Accuracy of Output and User Responsibility</h3>
-      <p>The accuracy and completeness of the reconciliation output are entirely dependent on the quality of the input files you provide. Errors or malformed data in your uploaded files will result in inaccurate output. It is solely your responsibility to review and verify the accuracy of the output before using it for any accounting, financial, or statutory purposes.</p>
+      <p>The content of the pages of this website is subject to change without notice.</p>
 
-      <h3>4. Data and Privacy</h3>
-      <p>When you upload files, they are processed by our system and may be stored temporarily. You are responsible for the data you upload and agree not to upload sensitive personal information not strictly necessary for reconciliation. You warrant that you have the necessary rights to process the data you provide.</p>
+      <p>Neither we nor any third parties provide any warranty or guarantee as to the accuracy, timeliness, performance, completeness or suitability of the information and materials found or offered on this website for any particular purpose. You acknowledge that such information and materials may contain inaccuracies or errors and we expressly exclude liability for any such inaccuracies or errors to the fullest extent permitted by law.</p>
 
-      <h3>5. Limitation of Liability</h3>
-      <p>Acer Tax & Corporate Services LLP shall not be liable for any indirect, incidental, or consequential damages, or any loss of profits or revenues, resulting from your use or inability to use the Service or your reliance on the output generated by the Service.</p>
+      <p>Your use of any information or materials on our website and/or product pages is entirely at your own risk, for which we shall not be liable. It shall be your own responsibility to ensure that any products, services or information available through our website and/or product pages meet your specific requirements.</p>
+
+      <p>Our website contains material which is owned by or licensed to us. This material includes, but are not limited to, the design, layout, look, appearance and graphics. Reproduction is prohibited other than in accordance with the copyright notice, which forms part of these terms and conditions.</p>
+
+      <p>All trademarks reproduced in our website which are not the property of, or licensed to, the operator are acknowledged on the website.</p>
+
+      <p>Unauthorized use of information provided by us shall give rise to a claim for damages and/or be a criminal offense.</p>
+
+      <p>From time to time our website may also include links to other websites. These links are provided for your convenience to provide further information.</p>
+
+      <p>You may not create a link to our website from another website or document without <strong>Acer Tax & Corporate Services LLP’s</strong> prior written consent.</p>
+
+      <p>Any dispute arising out of use of our website and/or purchase with us and/or any engagement with us is subject to the laws of India.</p>
+
+      <p>We shall be under no liability whatsoever in respect of any loss or damage arising directly or indirectly out of the decline of authorization for any Transaction, on Account of the Cardholder having exceeded the preset limit mutually agreed by us with our acquiring bank from time to time.</p>
 
       <button type="button" class="modal-close-cta" data-modal-id="terms-modal">Close</button>
     </div>
@@ -304,27 +349,123 @@
   <div id="refund-modal" class="modal">
     <div class="modal-content">
       <span class="modal-close-btn" data-modal-id="refund-modal">&times;</span>
-      <h2>Refund Policy for Acer Nova</h2>
-      <p><small>Last Updated: 12-11-2025</small></p>
+      <h2>Cancellation & Refund Policy for Acer Nova</h2>
+      <p><small>Last Updated: Dec 4th 2025</small></p>
 
-      <h3>1. General Policy</h3>
-      <p>Due to the digital nature of our Service and the immediate access granted upon subscription, our general policy is that all subscription fees are non-refundable. We do not offer refunds or credits for partial subscription periods or unused time.</p>
+      <p><strong>Acer Tax & Corporate Services LLP</strong> believes in helping its subscribers as far as possible, and has therefore a liberal cancellation policy. Under this policy:</p>
 
-      <h3>2. Exceptional Circumstances</h3>
-      <p>While our policy is non-refundable, AcerGST may, at its sole discretion, consider a refund in exceptional circumstances, such as demonstrable technical failures originating from our Service or significant billing errors. Additionally, any incorrect or duplicate charges (double debits) to your account where the excess payment was received by us will be refunded after the error is brought to our attention and verified.</p>
+      <p>Cancellations will be considered only if the request is made within 7 days of placing the order. However, the cancellation request may not be entertained if the orders have been communicated to the vendors/merchants and they have initiated the process of shipping them.</p>
 
-      <h3>3. How to Request a Refund</h3>
-      <p>If you believe your situation qualifies, you must submit a request in writing to <strong>info@acertax.com</strong>. Your email must include your registered email address, date of purchase, and a detailed explanation for your request. Submitting a request does not guarantee a refund, and all decisions made by the Acer tax team are final.</p>
+      <p>In case of any Refunds approved by the <strong>Acer Tax & Corporate Services LLP</strong>, it will take 6-8 days for the refund to be processed to the subscriber.</p>
 
       <button type="button" class="modal-close-cta" data-modal-id="refund-modal">Close</button>
     </div>
   </div>
 
+  <!-- Shipping Modal (New) -->
+  <div id="shipping-modal" class="modal">
+    <div class="modal-content">
+      <span class="modal-close-btn" data-modal-id="shipping-modal">&times;</span>
+      <h2>Shipping Policy</h2>
+      <p><small>Last Updated: Dec 4th 2025</small></p>
+
+      <p><strong>Acer Tax & Corporate Services LLP</strong> provides digital subscription services. As such, there is no physical shipping of goods involved.</p>
+
+      <p><strong>Delivery Timeline:</strong> The subscription service shall be delivered and activated within the same day (immediately) upon successful confirmation of payment.</p>
+
+      <p><strong>Confirmation:</strong> The details of the subscription, including the subscription start date and expiry date, shall be intimated to the user at their registered email ID provided at the time of registration.</p>
+
+      <p>For any issues in utilizing our services you may contact our helpdesk on <strong>9986044048</strong> or <strong>info@acertax.com</strong></p>
+
+      <button type="button" class="modal-close-cta" data-modal-id="shipping-modal">Close</button>
+    </div>
+  </div>
+
+  <!-- Privacy Modal (New) -->
+  <div id="privacy-modal" class="modal">
+    <div class="modal-content">
+      <span class="modal-close-btn" data-modal-id="privacy-modal">&times;</span>
+      <h2>Privacy Policy</h2>
+      <p><small>Last updated on Dec 4th 2025</small></p>
+
+      <p>This privacy policy sets out how <strong>Acer Tax & Corporate Services LLP</strong> uses and protects any information that you give <strong>Acer Tax & Corporate Services LLP</strong> when you visit their website and/or agree to purchase from them.</p>
+
+      <p><strong>Acer Tax & Corporate Services LLP</strong> is committed to ensuring that your privacy is protected. Should we ask you to provide certain information by which you can be identified when using this website, and then you can be assured that it will only be used in accordance with this privacy statement.</p>
+
+      <p><strong>Acer Tax & Corporate Services LLP</strong> may change this policy from time to time by updating this page. You should check this page from time to time to ensure that you adhere to these changes.</p>
+
+      <p>We may collect the following information:</p>
+      <ul>
+        <li>Name</li>
+        <li>Contact information including email address</li>
+
+      </ul>
+
+      <h3>What we do with the information we gather</h3>
+      <p>We require this information for the purposes of:</p>
+      <ul>
+        <li>Internal record keeping.</li>
+        <li>We may use the information to improve our products and services.</li>
+        <li>We may use the email id for the purposes of communication</li>
+
+      </ul>
+
+      <p>We are committed to ensuring that your information is secure. In order to prevent unauthorised access or disclosure we have put in suitable measures.</p>
+
+      <h3>How we use cookies</h3>
+      <p>A cookie is a small file which asks permission to be placed on your computer's hard drive. Once you agree, the file is added and the cookie helps analyze web traffic or lets you know when you visit a particular site. Cookies allow web applications to respond to you as an individual. The web application can tailor its operations to your needs, likes and dislikes by gathering and remembering information about your preferences.</p>
+
+      <p>We use traffic log cookies to identify which pages are being used. This helps us analyze data about webpage traffic and improve our website in order to tailor it to customer needs. We only use this information for statistical analysis purposes and then the data is removed from the system.</p>
+
+      <p>Overall, cookies help us provide you with a better website, by enabling us to monitor which pages you find useful and which you do not. A cookie in no way gives us access to your computer or any information about you, other than the data you choose to share with us.</p>
+
+      <p>You can choose to accept or decline cookies. Most web browsers automatically accept cookies, but you can usually modify your browser setting to decline cookies if you prefer. This may prevent you from taking full advantage of the website.</p>
+
+      <h3>Controlling your personal information</h3>
+      <p>You may choose to restrict the collection or use of your personal information in the following ways:</p>
+      <ul>
+
+        <li>if you have previously agreed to us using your personal information for direct marketing purposes, you may change your mind at any time by writing to or emailing us.</li>
+      </ul>
+
+      <p>We will not sell, distribute or lease your personal information to third parties unless we have your permission or are required by law to do so.</p>
+
+      <p>If you believe that any information we are holding on you is incorrect or incomplete, please write to <strong>No. 81, 8th Main, 8th Cross Serpentine Road, Kumara Park West, Bangalore - 560020, Karnataka, India</strong> or contact us as soon as possible. We will promptly correct any information found to be incorrect.</p>
+
+      <button type="button" class="modal-close-cta" data-modal-id="privacy-modal">Close</button>
+    </div>
+  </div>
+
+  <!-- Contact Modal (New) -->
+  <div id="contact-modal" class="modal">
+    <div class="modal-content">
+      <span class="modal-close-btn" data-modal-id="contact-modal">&times;</span>
+      <h2>Contact Us</h2>
+      <p><small>Last Updated: Dec 4th 2025</small></p>
+
+      <p>You may contact us using the information below:</p>
+
+      <p>
+        <strong>Legal entity name:</strong> Acer Tax & Corporate Services LLP<br>
+        <strong>Registered Address:</strong> No. 81, 8th Main, 8th Cross Serpentine Road, Kumara Park West, Bangalore - 560020, Karnataka, India<br>
+        <strong>Operational Address:</strong> No. 81, 8th Main, 8th Cross Serpentine Road, Kumara Park West, Bangalore - 560020, Karnataka, India<br>
+        <strong>Telephone No:</strong> 9986044048<br>
+        <strong>E-Mail ID:</strong> info@acertax.com
+      </p>
+
+      <button type="button" class="modal-close-cta" data-modal-id="contact-modal">Close</button>
+    </div>
+  </div>
+
   <script>
     document.addEventListener('DOMContentLoaded', () => {
+        // Map link IDs to their corresponding modal elements
         const modals = {
             'terms-link': document.getElementById('terms-modal'),
-            'refund-link': document.getElementById('refund-modal')
+            'refund-link': document.getElementById('refund-modal'),
+            'shipping-link': document.getElementById('shipping-modal'),
+            'privacy-link': document.getElementById('privacy-modal'),
+            'contact-link': document.getElementById('contact-modal')
         };
 
         const openModal = (modal) => {
@@ -335,16 +476,16 @@
             if (modal) modal.style.display = 'none';
         };
 
-        // Event listeners for opening modals
-        document.getElementById('terms-link').addEventListener('click', (e) => {
-            e.preventDefault();
-            openModal(modals['terms-link']);
-        });
-
-        document.getElementById('refund-link').addEventListener('click', (e) => {
-            e.preventDefault();
-            openModal(modals['refund-link']);
-        });
+        // Attach click events to all footer links dynamically
+        for (const [linkId, modalEl] of Object.entries(modals)) {
+            const link = document.getElementById(linkId);
+            if (link && modalEl) {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    openModal(modalEl);
+                });
+            }
+        }
 
         // Event listeners for closing modals (buttons and 'x')
         document.querySelectorAll('.modal-close-btn, .modal-close-cta').forEach(button => {

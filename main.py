@@ -24,16 +24,6 @@ import sqlalchemy as sa
 from sqlalchemy import inspect
 from datetime import date, timedelta
 
-# DEBUG STARTUP MARKER — keeps the worker logs honest
-import hashlib, time, os
-try:
-    _path = __file__
-    _mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(_path)))
-    _sha1 = hashlib.sha1(open(_path, 'rb').read()).hexdigest()
-    print(f"APP_START_MARKER path={_path} mtime={_mtime} sha1={_sha1}", flush=True)
-except Exception as _e:
-    print("APP_START_MARKER ERROR", _e, flush=True)
-
 # -------------------- Flask & App Config --------------------
 app = Flask(__name__)
 # Use SECRET_KEY from environment (Render), fallback for local dev
@@ -169,7 +159,7 @@ def download_from_drive(file_id: str, local_path: str):
 INVOICE_CANDIDATES_2B = [
     "invoice details invoice number", "invoice number", "invoice no", "inv no", "inv number",
     "invoice", "invoice details inv no", "invoice details document number",
-    "note no", "debit note no", "credit note no", "note number", "doc number", "doc no", "document number"
+    "note no", "debit note no", "credit note no", "note number", "doc number", "doc no", "document number", "document no."
 ]
 # Generic GSTIN (B2B)
 GSTIN_CANDIDATES_2B = [
@@ -184,7 +174,7 @@ DATE_CANDIDATES_2B = [
 ]
 # NEW: explicit note number/date/type candidates for CDNR
 NOTE_NO_CANDIDATES_2B = [
-    "note no", "note number", "credit note no", "debit note no", "cn no", "dn no", "document number", "document no"
+    "note no", "note number", "credit note no", "debit note no", "cn no", "dn no", "document number", "document no."
 ]
 NOTE_DATE_CANDIDATES_2B = [
     "note date", "document date", "doc date", "credit note date", "debit note date"
@@ -194,7 +184,7 @@ NOTE_TYPE_CANDIDATES_2B = [
 ]
 
 INV_TYPE_CANDIDATES = [
-    "document type", "doc type", "invoice type", "inv type", "type"
+    "document type", "doc type", "invoice type", "inv type", "type", "type of transaction"
 ]
 
 CGST_CANDIDATES_2B = ["cgst", "central tax", "central tax amount", "cgst amount"]
@@ -209,7 +199,7 @@ CESS_CANDIDATES_2B = ["cess", "cess amount"]
 INVOICE_CANDIDATES_PR = [
     "vendor inv no", "vendor invoice no", "vendor invoice number",
     "supplier inv no", "supplier invoice no", "supplier invoice number",
-    "party invoice no", "party inv no", "bill no", "bill number", "doc no", "doc number", "document number",
+    "party invoice no", "party inv no", "bill no", "bill number", "doc no", "doc number", "document number","document no."
     # generic fallbacks
     "invoice number", "invoice no", "inv no", "inv number", "invoice",
     # allow common accounting label
@@ -234,7 +224,7 @@ CESS_CANDIDATES_PR = ["cess", "cess amount"]
 
 # Avoid confusing PR invoice with doc/voucher and PR GSTIN with recipient/company
 AVOID_DOC_LIKE_FOR_PR = ["voucher no", "voucher number"]
-AVOID_RECIPIENT_GSTIN_FOR_PR = ["company gstin", "our gstin", "recipient gstin", "buyer gstin"]
+AVOID_RECIPIENT_GSTIN_FOR_PR = ["our gstin", "recipient gstin", "buyer gstin"]
 
 # keep-only extras
 VENDOR_NAME_PR_CANDIDATES = [
@@ -979,26 +969,60 @@ def verify_columns():
     session["tmppr"] = tmppr.name
     session["gstr2b_format"] = gstr2b_format
 
-    # Inspect sheets in GSTR-2B file
+    # --- VALIDATION START: Check file contents ---
+
+    # 1. Validate GSTR-2B File
     try:
-        with pd.ExcelFile(tmp2b.name) as xls:
-            sheet_names = xls.sheet_names
+        with pd.ExcelFile(tmp2b.name) as xls_2b:
+            sheets_2b = xls_2b.sheet_names
     except Exception as e:
         flash("Failed to read the GSTR-2B file. Ensure it is a valid Excel file.", "danger")
-        # Cleanup temp files and session on error
         try:
             os.remove(tmp2b.name); os.remove(tmppr.name)
-        except Exception:
-            pass
-        session.pop("tmp2b", None); session.pop("tmppr", None); session.pop("gstr2b_format", None)
+        except: pass
         return redirect(url_for("index"))
 
-    wanted_sheets = ["B2B", "B2B-CDNR"]
-    present_sheets = [sn for sn in wanted_sheets if sn in sheet_names]
-
-    if "B2B" not in present_sheets:
-        flash("Could not find a 'B2B' sheet in the GSTR-2B file.", "danger")
+    # Strict Rule: GSTR-2B must have a 'B2B' sheet
+    if "B2B" not in sheets_2b:
+        flash("Invalid GSTR-2B File: The file uploaded as GSTR-2B does not contain a 'B2B' sheet.", "danger")
+        try:
+            os.remove(tmp2b.name); os.remove(tmppr.name)
+        except: pass
         return redirect(url_for("index"))
+
+    # 2. Validate Purchase Register (Swap Check)
+    try:
+        with pd.ExcelFile(tmppr.name) as xls_pr:
+            sheets_pr = xls_pr.sheet_names
+
+            # Logic: If PR file has BOTH 'B2B' and 'B2B-CDNR', it is almost certainly the GSTR-2B file uploaded by mistake.
+            if "B2B" in sheets_pr and "B2B-CDNR" in sheets_pr:
+                flash("Incorrect File: It looks like you uploaded the GSTR-2B file in the Purchase Register slot. Please check your files.", "warning")
+                try:
+                    os.remove(tmp2b.name); os.remove(tmppr.name)
+                except: pass
+                return redirect(url_for("index"))
+
+            # Logic: If PR file matches the 2B file exactly (Same sheets)
+            if sheets_pr == sheets_2b:
+                flash("Duplicate Files: You seem to have uploaded the same file in both slots.", "warning")
+                try:
+                    os.remove(tmp2b.name); os.remove(tmppr.name)
+                except: pass
+                return redirect(url_for("index"))
+
+    except Exception as e:
+        flash("Failed to read the Purchase Register file. Ensure it is a valid Excel file.", "danger")
+        try:
+            os.remove(tmp2b.name); os.remove(tmppr.name)
+        except: pass
+        return redirect(url_for("index"))
+
+    # --- VALIDATION END ---
+
+    # Proceed with existing logic variables
+    sheet_names = sheets_2b
+    present_sheets = [sn for sn in ["B2B", "B2B-CDNR"] if sn in sheet_names]
 
     # Header rows depend on portal vs flat format
     header_rows = [4, 5] if gstr2b_format == "portal" else 0
@@ -1151,7 +1175,7 @@ def _append_if_missing(target_list: List[str], candidates: List[Optional[str]]) 
 
 # main.py
 
-def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format: str, return_period_str: str,
+def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format: str, target_return_period: str,
                                  # B2B (invoice-based)
                                  inv_2b_b2b_sel: str, gst_2b_b2b_sel: str, date_2b_b2b_sel: str, cgst_2b_b2b_sel: str, sgst_2b_b2b_sel: str, igst_2b_b2b_sel: str,
                                  # CDNR (note-based)
@@ -1168,23 +1192,11 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
     header_rows = [4, 5] if gstr2b_format == "portal" else 0
 
-    # Helper to load Excel using Calamine (Fast & Low Memory)
     def load_sheet(name):
-        try:
-            # Try using calamine first for speed/memory
-            df = pd.read_excel(tmp2b_path, sheet_name=name, header=header_rows, engine="calamine")
-        except Exception:
-            # Fallback to openpyxl if calamine fails (e.g. .xls vs .xlsx issues)
-            df = pd.read_excel(tmp2b_path, sheet_name=name, header=header_rows, engine="openpyxl")
-
+        df = pd.read_excel(tmp2b_path, sheet_name=name, header=header_rows)
         df = df.dropna(how="all")
         if df.empty:
             return df
-
-        # Convert all columns to string to save memory/avoid type errors
-        # (Pandas "string[pyarrow]" is more memory efficient than object, but "str" is safer for now)
-        df = df.astype(str)
-
         df.columns = flatten_columns(df.columns)
         df, _ = normalize_columns(df)
         df["_SOURCE_SHEET"] = name
@@ -1228,23 +1240,20 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         return df, pd.DataFrame()
 
-     # 2. Load and Filter Sheets
+    # 2. Load and Filter Sheets
     df_b2b_raw = load_sheet("B2B") if has_b2b else pd.DataFrame()
+
+    # FIX: Capture imports from B2B (Row 1 Format) separately
     df_b2b_raw, df_b2b_imports = _filter_imports_overseas(df_b2b_raw)
 
     df_cdnr_raw = load_sheet("B2B-CDNR") if has_cdnr else pd.DataFrame()
+
     df_impg_raw = load_sheet("IMPG") if "IMPG" in sheet_names else pd.DataFrame()
 
-    # Load PR using calamine as well
-    try:
-        df_pr_raw = pd.read_excel(tmppr_path, engine="calamine")
-    except:
-        df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
-
-    # Convert to string immediately to prevent object overhead
-    df_pr_raw = df_pr_raw.astype(str)
-
+    df_pr_raw = pd.read_excel(tmppr_path, engine="openpyxl", dtype=str)
     df_pr_raw, pr_norm_map = normalize_columns(df_pr_raw)
+
+    # Filter PR (we just discard PR imports, so we use underscore _)
     df_pr_raw, _ = _filter_imports_overseas(df_pr_raw)
 
     # 3. CRITICAL: Force Negative Signs on CDNR Immediately
@@ -1591,304 +1600,210 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
     )
 
     # ------------------ ITC COMPUTATION BY CODE ------------------
-    def sum_column(df, col):
-        if df is None or df.empty or not col:
-            return 0.0
-        if col not in df.columns:
-            return 0.0
-        try:
-            return float(df[col].astype(str).map(parse_amount).sum())
-        except Exception:
-            return 0.0
 
-    def pick_tax_cols_for_sheet(df):
-        igst_col = _find_optional_col(df, [IGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"igst|integrated") if df is not None else None)
-        cgst_col = _find_optional_col(df, [CGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"cgst|central") if df is not None else None)
-        sgst_col = _find_optional_col(df, [SGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"sgst|state|utgst") if df is not None else None)
-        return igst_col, cgst_col, sgst_col
-
-    # 4A1 Calculation
-    # Logic:
-    # - GST Portal Format: Comes from IMPG sheet (df_b2b_imports will be empty).
-    # - Row 1 Format: Comes from captured B2B imports (IMPG sheet will be empty).
-
-    # A. From IMPG Sheet
-    impg_igst_col, impg_cgst_col, impg_sgst_col = pick_tax_cols_for_sheet(df_impg_raw)
-    val_4a1_impg = sum_column(df_impg_raw_signed, impg_igst_col)
-
-    # B. From B2B Import Lines (Row 1 Format)
-    val_4a1_flat = 0.0
-    if 'df_b2b_imports' in locals() and not df_b2b_imports.empty:
-        # Identify IGST column in the imports dataframe
-        imp_igst, _, _ = pick_tax_cols_for_sheet(df_b2b_imports)
-        val_4a1_flat = sum_column(df_b2b_imports, imp_igst)
-
-    # Final 4A1 Value
-    val_4a1_igst = val_4a1_impg + val_4a1_flat
-
-    # ---- 4A3: Inward supplies liable to reverse charge (B2B) ----
-    val_4a3_igst = val_4a3_cgst = val_4a3_sgst = 0.0
-    try:
-        if 'df_b2b_raw' in locals() and df_b2b_raw is not None and not df_b2b_raw.empty:
-            # Find "Reverse Charge" column (e.g., "Supply Attract Reverse Charge")
-            rc_candidates = ["supply attract reverse charge", "reverse charge", "reverse charge mechanism", "attract reverse charge"]
-            rc_col = _find_optional_col(df_b2b_raw, [rc_candidates])
-
-            # Identify tax columns in B2B raw
-            b2b_ig, b2b_cg, b2b_sg = pick_tax_cols_for_sheet(df_b2b_raw)
-
-            if rc_col:
-                # Filter rows where RC is 'Yes' or 'Y' (case-insensitive)
-                mask_rc = df_b2b_raw[rc_col].astype(str).str.strip().str.lower().isin(["yes", "y"])
-                df_rc = df_b2b_raw[mask_rc]
-
-                if not df_rc.empty:
-                    # Helper to sum column safely
-                    def _sum_c(d, c):
-                        return float(d[c].astype(str).map(parse_amount).sum()) if c in d.columns else 0.0
-
-                    val_4a3_igst = _sum_c(df_rc, b2b_ig)
-                    val_4a3_cgst = _sum_c(df_rc, b2b_cg)
-                    val_4a3_sgst = _sum_c(df_rc, b2b_sg)
-    except Exception:
-        val_4a3_igst = val_4a3_cgst = val_4a3_sgst = 0.0
-
-    # ---- 4A2, 4A4 (Placeholder / Default 0) ----
-    val_4a2_igst = 0.0
-    val_4a4_igst = 0.0
-
-    # ---- 4A5: All other ITC ----
-    # Formula: (Total B2B Signed - Total CDNR Signed) - 4A3 (Reverse Charge)
-    # We assume 4A3 items are included in B2B totals, so we remove them to separate "Others"
-    b2b_igst_col, b2b_cgst_col, b2b_sgst_col = pick_tax_cols_for_sheet(df_b2b_raw)
-    cdnr_igst_col, cdnr_cgst_col, cdnr_sgst_col = pick_tax_cols_for_sheet(df_cdnr_raw)
-
-    b2b_igst_sum = sum_column(df_b2b_raw_signed, b2b_igst_col)
-    b2b_cgst_sum = sum_column(df_b2b_raw_signed, b2b_cgst_col)
-    b2b_sgst_sum = sum_column(df_b2b_raw_signed, b2b_sgst_col)
-
-    cdnr_igst_sum = sum_column(df_cdnr_raw_signed, cdnr_igst_col)
-    cdnr_cgst_sum = sum_column(df_cdnr_raw_signed, cdnr_cgst_col)
-    cdnr_sgst_sum = sum_column(df_cdnr_raw_signed, cdnr_sgst_col)
-
-    # Net 4A5
-    val_4a5_igst = (b2b_igst_sum + cdnr_igst_sum) - val_4a3_igst
-    val_4a5_cgst = (b2b_cgst_sum + cdnr_cgst_sum) - val_4a3_cgst
-    val_4a5_sgst = (b2b_sgst_sum + cdnr_sgst_sum) - val_4a3_sgst
-
-    # Build row dicts per code
-    row_4a1 = {"integrated": val_4a1_igst, "central": 0.0, "state": 0.0, "cess": 0.0} # defined earlier
-    row_4a2 = {"integrated": val_4a2_igst, "central": 0.0, "state": 0.0, "cess": 0.0}
-    row_4a3 = {"integrated": val_4a3_igst, "central": val_4a3_cgst, "state": val_4a3_sgst, "cess": 0.0}
-    row_4a4 = {"integrated": val_4a4_igst, "central": 0.0, "state": 0.0, "cess": 0.0}
-    row_4a5 = {"integrated": val_4a5_igst, "central": val_4a5_cgst, "state": val_4a5_sgst, "cess": 0.0}
-
-    # 4B1 left zero (no explicit source for 4B1)
-    row_4b1 = {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0}
-
-    # ---------------- Robust 4B2 computation (REPLACEMENT: simple, source-sheet-based sums) ----------------
-    # Build a mapping from (GST, INV) -> Mapping so we can check original rows
+    # 1. Build Lookup Dictionary
     recon_lookup = {}
     try:
-        for _, r in combined_df.iterrows():
-            k = (as_text(r.get("_GST_KEY", "")), as_text(r.get("_INV_KEY", "")))
-            recon_lookup[k] = (r.get("Mapping", ""), r.get("Remarks", ""), r.get("Reason", ""))
-    except Exception:
-        recon_lookup = {}
+        if 'combined_df' in locals() and not combined_df.empty:
+            for _, r in combined_df.iterrows():
+                k = (as_text(r.get("_GST_KEY", "")), as_text(r.get("_INV_KEY", "")))
+                recon_lookup[k] = (r.get("Mapping", ""), r.get("Remarks", ""), r.get("Reason", ""))
+    except Exception as e:
+        app.logger.error(f"Failed to build recon_lookup: {e}")
 
-    # Helper to pick tax columns from a raw df (signed)
-    try:
-        # pick_tax_cols_for_sheet returns (igst_col, cgst_col, sgst_col)
-        b2b_igst_col, b2b_cgst_col, b2b_sgst_col = pick_tax_cols_for_sheet(df_b2b_raw_signed) if ( 'df_b2b_raw_signed' in locals() and df_b2b_raw_signed is not None and not df_b2b_raw_signed.empty) else (None, None, None)
-        cdnr_igst_col, cdnr_cgst_col, cdnr_sgst_col = pick_tax_cols_for_sheet(df_cdnr_raw_signed) if ( 'df_cdnr_raw_signed' in locals() and df_cdnr_raw_signed is not None and not df_cdnr_raw_signed.empty) else (None, None, None)
-    except Exception:
-        b2b_igst_col = b2b_cgst_col = b2b_sgst_col = None
-        cdnr_igst_col = cdnr_cgst_col = cdnr_sgst_col = None
+    # 2. Helper Functions
+    def sum_column(df, col):
+        if df is None or df.empty or not col: return 0.0
+        if col not in df.columns: return 0.0
+        try: return float(df[col].astype(str).map(parse_amount).sum())
+        except: return 0.0
 
-    def _sum_not_matched_in_sheet(df_signed, gst_col, inv_col, tax_col):
-        """
-        Sum numeric values from df_signed[tax_col] for rows whose (gst,inv) maps to Mapping == 'Not Matched'.
-        Uses clean_gstin and inv_basic to build keys and parse_amount to safely parse numbers.
-        """
-        if df_signed is None or df_signed.empty or not gst_col or not inv_col or not tax_col:
-            return 0.0
-        if gst_col not in df_signed.columns or inv_col not in df_signed.columns or tax_col not in df_signed.columns:
-            return 0.0
-        total = 0.0
-        for _, row in df_signed.iterrows():
-            try:
-                gst = clean_gstin(row.get(gst_col, ""))
-                inv = inv_basic(row.get(inv_col, ""))
-                if not gst or not inv:
-                    continue
-                key = (as_text(gst), as_text(inv))
-                mapping = recon_lookup.get(key, ("",))[0]
-                if isinstance(mapping, str) and mapping.strip().lower() == "not matched":
-                    # parse the tax cell robustly
-                    total += parse_amount(row.get(tax_col, 0))
-            except Exception:
-                # ignore row-level errors and continue
-                continue
-        return float(total)
+    def pick_tax_cols_for_sheet(df):
+        ig = _find_optional_col(df, [IGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"igst|integrated") if df is not None else None)
+        cg = _find_optional_col(df, [CGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"cgst|central") if df is not None else None)
+        sg = _find_optional_col(df, [SGST_CANDIDATES_2B]) or (_pick_col_contains(df, r"sgst|state|utgst") if df is not None else None)
+        return ig, cg, sg
 
-    # Compute B2B sums for each tax (only Not Matched rows) and CDNR sums likewise, then subtract
-    try:
-        # B2B sums
-        b2b_not_matched_igst = _sum_not_matched_in_sheet(df_b2b_raw_signed, gst_2b_b2b, inv_2b_b2b, b2b_igst_col)
-        b2b_not_matched_cgst = _sum_not_matched_in_sheet(df_b2b_raw_signed, gst_2b_b2b, inv_2b_b2b, b2b_cgst_col)
-        b2b_not_matched_sgst = _sum_not_matched_in_sheet(df_b2b_raw_signed, gst_2b_b2b, inv_2b_b2b, b2b_sgst_col)
+    def _get_itc_col(df):
+        if df is None or df.empty: return None
+        # Priority 1: Exact match for "ITC Availability"
+        for col in df.columns:
+            if "itc availability" in str(col).lower(): return col
+        # Priority 2: "ITC Available" (common variation)
+        for col in df.columns:
+            if "itc available" in str(col).lower(): return col
+        return None
 
-        # CDNR sums (note-based)
-        cdnr_not_matched_igst = _sum_not_matched_in_sheet(df_cdnr_raw_signed, gst_2b_cdnr, note_2b_cdnr, cdnr_igst_col)
-        cdnr_not_matched_cgst = _sum_not_matched_in_sheet(df_cdnr_raw_signed, gst_2b_cdnr, note_2b_cdnr, cdnr_cgst_col)
-        cdnr_not_matched_sgst = _sum_not_matched_in_sheet(df_cdnr_raw_signed, gst_2b_cdnr, note_2b_cdnr, cdnr_sgst_col)
-    except Exception:
-        b2b_not_matched_igst = b2b_not_matched_cgst = b2b_not_matched_sgst = 0.0
-        cdnr_not_matched_igst = cdnr_not_matched_cgst = cdnr_not_matched_sgst = 0.0
+    # Identify RCM and ITC columns
+    def _get_col_by_keywords(df, keywords):
+        if df is None or df.empty: return None
+        for col in df.columns:
+            c_norm = str(col).lower().strip()
+            if any(k in c_norm for k in keywords): return col
+        return None
 
-    # final 4B2 values = sum(NotMatched in B2B) - sum(NotMatched in B2B-CDNR)
-    val_4b2_igst = float(b2b_not_matched_igst + cdnr_not_matched_igst)
-    val_4b2_cgst = float(b2b_not_matched_cgst + cdnr_not_matched_cgst)
-    val_4b2_sgst = float(b2b_not_matched_sgst + cdnr_not_matched_sgst)
+    rc_col_b2b = _get_col_by_keywords(df_b2b_raw, ["reverse charge", "attract reverse charge"])
 
+    # STRICT ITC Column Search
+    itc_col_b2b = _get_itc_col(df_b2b_raw)
+    itc_col_cdnr = _get_itc_col(df_cdnr_raw)
+
+    # 3. Filtered Summation Logic
+    def calc_filtered_sum(df_signed, df_raw, filter_logic="all", mapping_status_check=False):
+        if df_signed is None or df_signed.empty: return 0.0, 0.0, 0.0
+
+        ig, cg, sg = pick_tax_cols_for_sheet(df_signed)
+        is_b2b = "_SOURCE_SHEET" in df_raw.columns and df_raw["_SOURCE_SHEET"].iloc[0] == "B2B"
+
+        gst_key_col = gst_2b_b2b if is_b2b else gst_2b_cdnr
+        inv_key_col = inv_2b_b2b if is_b2b else note_2b_cdnr
+
+        # Use the correct ITC column for the current sheet
+        current_itc_col = itc_col_b2b if is_b2b else itc_col_cdnr
+
+        total_i, total_c, total_s = 0.0, 0.0, 0.0
+
+        try:
+            # Reset indexes
+            df_r = df_raw.reset_index(drop=True)
+            df_s = df_signed.reset_index(drop=True)
+
+            for idx, row in df_s.iterrows():
+                if idx >= len(df_r): break
+                raw_row = df_r.iloc[idx]
+
+                if mapping_status_check:
+                    g = clean_gstin(raw_row.get(gst_key_col, ""))
+                    i = inv_basic(raw_row.get(inv_key_col, ""))
+                    status = str(recon_lookup.get((g, i), ("",))[0]).strip().lower()
+                    if status != "not matched": continue
+
+                if filter_logic == "rcm_yes":
+                    if not rc_col_b2b: continue
+                    val = str(raw_row.get(rc_col_b2b, "")).lower().strip()
+                    if val not in ["yes", "y"]: continue
+
+                elif filter_logic == "itc_no":
+                    if not current_itc_col: continue
+                    val = str(raw_row.get(current_itc_col, "")).lower().strip()
+                    # STRICT CHECK: Only "No"
+                    if val not in ["no", "n", "ineligible"]: continue
+
+                total_i += parse_amount(row.get(ig, 0))
+                total_c += parse_amount(row.get(cg, 0))
+                total_s += parse_amount(row.get(sg, 0))
+        except: return 0.0, 0.0, 0.0
+
+        return total_i, total_c, total_s
+
+    # --- 4A & 4B Calculations ---
+
+    # 4A1
+    impg_ig, _, _ = pick_tax_cols_for_sheet(df_impg_raw)
+    val_4a1_flat = sum_column(df_b2b_imports, pick_tax_cols_for_sheet(df_b2b_imports)[0]) if 'df_b2b_imports' in locals() else 0.0
+    val_4a1_igst = sum_column(df_impg_raw_signed, impg_ig) + val_4a1_flat
+
+    # 4A3 (RCM)
+    val_4a3_igst, val_4a3_cgst, val_4a3_sgst = calc_filtered_sum(df_b2b_raw_signed, df_b2b_raw, "rcm_yes")
+
+    # 4A5 (Net ITC)
+    b2b_i, b2b_c, b2b_s = calc_filtered_sum(df_b2b_raw_signed, df_b2b_raw, "all")
+    cdnr_i, cdnr_c, cdnr_s = calc_filtered_sum(df_cdnr_raw_signed, df_cdnr_raw, "all")
+
+    # Ineligible B2B
+    itc_no_i, itc_no_c, itc_no_s = calc_filtered_sum(df_b2b_raw_signed, df_b2b_raw, "itc_no")
+
+    val_4a5_igst = (b2b_i + cdnr_i) - val_4a3_igst - itc_no_i
+    val_4a5_cgst = (b2b_c + cdnr_c) - val_4a3_cgst - itc_no_c
+    val_4a5_sgst = (b2b_s + cdnr_s) - val_4a3_sgst - itc_no_s
+
+    # 4B2 (Not Matched Logic)
+    nm_b2b_i, nm_b2b_c, nm_b2b_s = calc_filtered_sum(df_b2b_raw_signed, df_b2b_raw, "all", True)
+    nm_cdnr_i, nm_cdnr_c, nm_cdnr_s = calc_filtered_sum(df_cdnr_raw_signed, df_cdnr_raw, "all", True)
+    nm_rcm_i, nm_rcm_c, nm_rcm_s = calc_filtered_sum(df_b2b_raw_signed, df_b2b_raw, "rcm_yes", True)
+    nm_itc_no_i, nm_itc_no_c, nm_itc_no_s = calc_filtered_sum(df_b2b_raw_signed, df_b2b_raw, "itc_no", True)
+
+    val_4b2_igst = (nm_b2b_i + nm_cdnr_i) - nm_rcm_i - nm_itc_no_i
+    val_4b2_cgst = (nm_b2b_c + nm_cdnr_c) - nm_rcm_c - nm_itc_no_c
+    val_4b2_sgst = (nm_b2b_s + nm_cdnr_s) - nm_rcm_s - nm_itc_no_s
+
+    # --- 4D2 (Ineligible ITC: B2B No + CDNR No) ---
+    # Calculate CDNR Ineligible (ITC No).
+    itc_no_cdnr_i, itc_no_cdnr_c, itc_no_cdnr_s = calc_filtered_sum(df_cdnr_raw_signed, df_cdnr_raw, "itc_no")
+
+    # Sum B2B No + CDNR No
+    val_4d2_igst = itc_no_i + itc_no_cdnr_i
+    val_4d2_cgst = itc_no_c + itc_no_cdnr_c
+    val_4d2_sgst = itc_no_s + itc_no_cdnr_s
+
+    # Construct Rows
+    row_4a1 = {"integrated": val_4a1_igst, "central": 0.0, "state": 0.0, "cess": 0.0}
+    row_4a2 = {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0}
+    row_4a3 = {"integrated": val_4a3_igst, "central": val_4a3_cgst, "state": val_4a3_sgst, "cess": 0.0}
+    row_4a4 = {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0}
+    row_4a5 = {"integrated": val_4a5_igst, "central": val_4a5_cgst, "state": val_4a5_sgst, "cess": 0.0}
+    row_4b1 = {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0}
     row_4b2 = {"integrated": val_4b2_igst, "central": val_4b2_cgst, "state": val_4b2_sgst, "cess": 0.0}
-    # ---------------- end replacement for 4B2 computation ----------------
+    row_4d2 = {"integrated": val_4d2_igst, "central": val_4d2_cgst, "state": val_4d2_sgst, "cess": 0.0}
 
+    def sum_rows(rows, key): return sum((r.get(key, 0.0) for r in rows), 0.0)
 
-    def sum_rows(rows, key):
-        return sum((r.get(key, 0.0) for r in rows), 0.0)
+    row_4a = {k: sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], k) for k in ["integrated", "central", "state", "cess"]}
+    row_4b = {k: sum_rows([row_4b1, row_4b2], k) for k in ["integrated", "central", "state", "cess"]}
+    row_4c = {k: row_4a[k] - row_4b[k] for k in ["integrated", "central", "state", "cess"]}
 
-    row_4a = {
-        "integrated": sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], "integrated"),
-        "central":    sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], "central"),
-        "state":      sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], "state"),
-        "cess":       sum_rows([row_4a1, row_4a2, row_4a3, row_4a4, row_4a5], "cess"),
-    }
+    # --- 4D1 CALCULATION ---
+    val_4d1_i = val_4d1_c = val_4d1_s = 0.0
 
-    row_4b = {
-        "integrated": sum_rows([row_4b1, row_4b2], "integrated"),
-        "central":    sum_rows([row_4b1, row_4b2], "central"),
-        "state":      sum_rows([row_4b1, row_4b2], "state"),
-        "cess":       sum_rows([row_4b1, row_4b2], "cess"),
-    }
+    if target_return_period and target_return_period.strip():
+        try:
+            parts = target_return_period.strip().split('-')
+            user_dt = datetime(int(parts[0]), int(parts[1]), 1)
 
-    row_4c = {
-        "integrated": row_4a["integrated"] - row_4b["integrated"],
-        "central":    row_4a["central"] - row_4b["central"],
-        "state":      row_4a["state"] - row_4b["state"],
-        "cess":       row_4a["cess"] - row_4b["cess"],
-    }
-
-        # ---- START: Compute 4D1 (Logic: Sum Matched B2B - Sum Matched CDNR, excluding latest month) ----
-    try:
-        # 1. Local Helper to find filing date column (since the main one isn't defined yet)
-        def _loc_find_date_col(df):
-            if df is None or df.empty: return None
-            # Look for explicit "filing date" columns first
-            for c in df.columns:
-                cn = str(c).lower().replace(" ", "").replace("\xa0", "")
-                if "filing" in cn and "date" in cn: return c
-            return None
-
-        # 2. Helper to get Tax Period datetime from date cells
-        def _get_tp(val):
-            try:
-                d = parse_date_cell(val)
-                if not d: return None
-                # Force integer conversion for safety
-                y, m = int(d.year), int(d.month)
-
-                # Rule: if filing date >= 12th, it's current month, else previous
-                if d.day >= 12:
-                    return datetime(y, m, 1)
-                else:
-                    # Move to previous month safely
-                    first = datetime(y, m, 1)
-                    return first - timedelta(days=1)
-            except Exception:
+            def _loc_filing_col(df):
+                for c in df.columns:
+                    if "filing" in str(c).lower() and "date" in str(c).lower() and "period" not in str(c).lower(): return c
                 return None
 
-        # 3. Function to extract valid rows (Tax Period, IGST, CGST, SGST) from a raw df
-        def _extract_rows(df_raw, gst_col, inv_col, date_col, ig_col, cg_col, sg_col):
-            rows = []
-            if df_raw is None or df_raw.empty: return rows
+            def sum_prev(df_signed, df_raw):
+                i_t, c_t, s_t = 0.0, 0.0, 0.0
+                if df_signed is None or df_signed.empty: return 0,0,0
 
-            for _, r in df_raw.iterrows():
-                g = clean_gstin(r.get(gst_col, ""))
-                i = inv_basic(r.get(inv_col, ""))
-                if not g or not i: continue
+                ig, cg, sg = pick_tax_cols_for_sheet(df_signed)
+                df_r = df_raw.reset_index(drop=True)
+                df_s = df_signed.reset_index(drop=True)
 
-                # Check if Matched/Almost Matched
-                status = recon_lookup.get((g, i), ("","",""))[0]
-                if status not in ["Matched", "Almost Matched"]:
-                    continue
+                f_col = _loc_filing_col(df_raw)
 
-                # Get Date object for sorting/filtering
-                dt_obj = _get_tp(r.get(date_col))
+                for idx, row in df_s.iterrows():
+                    if idx >= len(df_r): break
+                    raw_row = df_r.iloc[idx]
+                    d = None
+                    if f_col: d = parse_date_cell(raw_row.get(f_col))
+                    if not d:
+                        is_b2b = "_SOURCE_SHEET" in df_raw.columns and df_raw["_SOURCE_SHEET"].iloc[0] == "B2B"
+                        dc = date_2b_b2b if is_b2b else notedate_2b_cdnr
+                        d = parse_date_cell(raw_row.get(dc))
 
-                if dt_obj:
-                    rows.append({
-                        "dt": dt_obj,
-                        "i": parse_amount(r.get(ig_col, 0)),
-                        "c": parse_amount(r.get(cg_col, 0)),
-                        "s": parse_amount(r.get(sg_col, 0))
-                    })
-            return rows
+                    if d:
+                        row_tp = datetime(d.year, d.month, 1) if d.day >= 12 else (datetime(d.year, d.month, 1) - timedelta(days=1)).replace(day=1)
+                        if row_tp < user_dt:
+                            i_t += parse_amount(row.get(ig, 0))
+                            c_t += parse_amount(row.get(cg, 0))
+                            s_t += parse_amount(row.get(sg, 0))
+                return i_t, c_t, s_t
 
-        # 4. Extract rows from B2B
-        # Attempt to find filing date column, else fallback to invoice date
-        b2b_date_col = _loc_find_date_col(df_b2b_raw) or date_2b_b2b
-        b2b_ig, b2b_cg, b2b_sg = pick_tax_cols_for_sheet(df_b2b_raw)
+            p_b2b_i, p_b2b_c, p_b2b_s = sum_prev(df_b2b_raw_signed, df_b2b_raw)
+            p_cdnr_i, p_cdnr_c, p_cdnr_s = sum_prev(df_cdnr_raw_signed, df_cdnr_raw)
 
-        b2b_rows = _extract_rows(df_b2b_raw, gst_2b_b2b, inv_2b_b2b, b2b_date_col, b2b_ig, b2b_cg, b2b_sg)
+            val_4d1_i = p_b2b_i + p_cdnr_i
+            val_4d1_c = p_b2b_c + p_cdnr_c
+            val_4d1_s = p_b2b_s + p_cdnr_s
 
-        # 5. Extract rows from CDNR
-        cdnr_date_col = _loc_find_date_col(df_cdnr_raw) or notedate_2b_cdnr
-        cdnr_ig, cdnr_cg, cdnr_sg = pick_tax_cols_for_sheet(df_cdnr_raw)
+        except Exception as e:
+            app.logger.error(f"4D1 Calc Error: {e}")
 
-        cdnr_rows = _extract_rows(df_cdnr_raw, gst_2b_cdnr, note_2b_cdnr, cdnr_date_col, cdnr_ig, cdnr_cg, cdnr_sg)
-
-        # 6. Determine Latest Month across ALL valid data (B2B + CDNR)
-        all_dates = [r['dt'] for r in b2b_rows] + [r['dt'] for r in cdnr_rows]
-        if all_dates:
-            # We format back to month-start to ensure clean comparison
-            clean_dates = [datetime(d.year, d.month, 1) for d in all_dates]
-            latest_date = max(clean_dates)
-        else:
-            latest_date = None
-
-        # 7. Sum B2B (Excluding Latest)
-        sum_b2b_i = sum_b2b_c = sum_b2b_s = 0.0
-        for r in b2b_rows:
-            r_date = datetime(r['dt'].year, r['dt'].month, 1)
-            if latest_date and r_date >= latest_date:
-                continue
-            sum_b2b_i += r['i']
-            sum_b2b_c += r['c']
-            sum_b2b_s += r['s']
-
-        # 8. Sum CDNR (Excluding Latest)
-        sum_cdnr_i = sum_cdnr_c = sum_cdnr_s = 0.0
-        for r in cdnr_rows:
-            r_date = datetime(r['dt'].year, r['dt'].month, 1)
-            if latest_date and r_date >= latest_date:
-                continue
-            sum_cdnr_i += r['i']
-            sum_cdnr_c += r['c']
-            sum_cdnr_s += r['s']
-
-        # 9. Net Value = B2B - CDNR
-        final_i = sum_b2b_i + sum_cdnr_i
-        final_c = sum_b2b_c + sum_cdnr_c
-        final_s = sum_b2b_s + sum_cdnr_s
-
-        row_4d1 = {"integrated": final_i, "central": final_c, "state": final_s, "cess": 0.0}
-
-    except Exception as e:
-        try: app.logger.error(f"4D1 Error: {e}")
-        except: pass
-        row_4d1 = {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0}
-    # ---- END: Compute 4D1 ----
+    row_4d1 = {"integrated": val_4d1_i, "central": val_4d1_c, "state": val_4d1_s, "cess": 0.0}
 
     itc_values_by_code = {
         "4A":  row_4a,
@@ -1903,7 +1818,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         "4C":  row_4c,
         "4D":  {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0},
         "4D1": row_4d1,
-        "4D2": {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0},
+        "4D2": row_4d2,
     }
     # ------------------ END ITC COMPUTATION ------------------
 
@@ -2357,6 +2272,12 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws2.write_number(r, col+1, v, dash_table_num)
             col += 2
 
+        # NEW: Add Note below Summary Table
+        note_row_idx = data_start + len(rowlabels)
+        ws2.merge_range(note_row_idx, 0, note_row_idx, last_col_idx,
+                        "Note: The above table summary includes B2B (including RCM and POS) and CDNR values from GSTR 2B. Does not include imports or ISD",
+                        wb.add_format({"italic": True, "font_color": "red", "align": "left"}))
+
         ws2.freeze_panes(data_start, 0)
         ws2.set_column(0, 0, 14)
         for c in range(1, total_cols):
@@ -2516,7 +2437,7 @@ from rq import get_current_job
 import tempfile, os, time
 from concurrent.futures import ThreadPoolExecutor
 
-def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal", return_period: str = None) -> dict:
+def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal", target_return_period: str = "") -> dict:
     def _mark(pct, msg):
         j = get_current_job()
         if j:
@@ -2543,11 +2464,12 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
         _mark(30, "Reconciling")
         x = selections
 
-        # Pass return_period_str to the pipeline
+        # --- START: THIS IS THE FIX ---
+        # Pass the gstr2b_format and target_return_period arguments down.
         blob = _run_reconciliation_pipeline(
             tmp2b_path=in2b, tmppr_path=inpr,
             gstr2b_format=gstr2b_format,
-            return_period_str=return_period,
+            target_return_period=target_return_period,
             # B2B
             inv_2b_b2b_sel=x.get("inv_2b_b2b",""), gst_2b_b2b_sel=x.get("gst_2b_b2b",""), date_2b_b2b_sel=x.get("date_2b_b2b",""), cgst_2b_b2b_sel=x.get("cgst_2b_b2b",""), sgst_2b_b2b_sel=x.get("sgst_2b_b2b",""), igst_2b_b2b_sel=x.get("igst_2b_b2b",""),
             # CDNR
@@ -2555,6 +2477,7 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
             # PR
             inv_pr_sel=x.get("inv_pr",""), gst_pr_sel=x.get("gst_pr",""), date_pr_sel=x.get("date_pr",""), cgst_pr_sel=x.get("cgst_pr",""), sgst_pr_sel=x.get("sgst_pr",""), igst_pr_sel=x.get("igst_pr","")
         )
+        # --- END: THIS IS THE FIX ---
 
         _mark(82, f"Reconcile+write took {time.time()-t0:.1f}s")
 
@@ -2575,10 +2498,11 @@ def reconcile_confirm():
         flash("Upload session expired. Please re-upload the files.")
         return redirect(url_for("index"))
 
+    # Get the format choice from the session here, within the request context.
     gstr2b_format = session.get("gstr2b_format", "portal")
 
-    # NEW: Capture the Return Period input
-    return_period = request.form.get("return_period")
+    # NEW: Capture the user-selected return period (e.g. '2025-09')
+    target_return_period = request.form.get("return_period", "").strip()
 
     sel = {
         # B2B (invoice-based)
@@ -2613,18 +2537,23 @@ def reconcile_confirm():
         except Exception:
             pass
         session.pop("tmp2b", None); session.pop("tmppr", None)
+        # --- START: THIS IS THE FIX ---
+        # Clean up the format from the session as well.
         session.pop("gstr2b_format", None)
+        # --- END: THIS IS THE FIX ---
 
     user_id = request.form.get("user_id", "anon")
 
-    # Pass return_period to the worker
+    # Pass gstr2b_format and target_return_period as new arguments to the background job.
     job = q.enqueue(
         "main.process_reconcile",
-        drive_id_2b, drive_id_pr, sel, user_id, gstr2b_format, return_period,
+        drive_id_2b, drive_id_pr, sel, user_id, gstr2b_format, target_return_period,
         job_timeout=-1,
         result_ttl=86400,
         failure_ttl=86400
     )
+
+    # --- END: THIS IS THE FIX ---
 
     return render_template("progress.html", job_id=job.id)
 
@@ -2776,138 +2705,6 @@ def subscribe():
     return render_template('subscribe.html')
 
 from typing import Any, Dict, Optional
-import os
-import hashlib
-
-def _sanitize_env_value(val: Optional[str]) -> str:
-    """Strip whitespace and inline comments from env-var values."""
-    if val is None:
-        return ""
-    s = str(val)
-    if "#" in s:
-        s = s.split("#", 1)[0]
-    return s.strip()
-
-
-def _format_amount(amount_raw: Any) -> str:
-    """Force amount to two-decimal string (e.g. 20000 → 20000.00)."""
-    try:
-        return "{:.2f}".format(float(amount_raw))
-    except (ValueError, TypeError):
-        return str(amount_raw).strip()
-
-
-def build_hash_sequence(params: Dict[str, Any], salt: str) -> str:
-    """
-    Return the *exact* pipe-separated string that PayU hashes.
-    The order is fixed – 18 fields, 6 of them empty after udf5.
-    """
-    def _trim(x):
-        return "" if x is None else str(x).strip()
-
-    # ---- mandatory fields -------------------------------------------------
-    key         = _trim(params.get("key", _sanitize_env_value(os.getenv("PAYU_MERCHANT_KEY", ""))))
-    txnid       = _trim(params.get("txnid", ""))
-    amount      = _format_amount(params.get("amount", "0"))
-    productinfo = _trim(params.get("productinfo", ""))
-    firstname   = _trim(params.get("firstname", ""))
-    email       = _trim(params.get("email", ""))
-
-    # ---- validation -------------------------------------------------------
-    if not firstname:
-        raise ValueError("firstname is required and cannot be empty")
-    if "@" in firstname:
-        raise ValueError("firstname cannot be an e-mail address – use the actual name")
-
-    # ---- UDF 1-5 (always present, even if empty) -------------------------
-    udf1 = _trim(params.get("udf1", ""))
-    udf2 = _trim(params.get("udf2", ""))
-    udf3 = _trim(params.get("udf3", ""))
-    udf4 = _trim(params.get("udf4", ""))
-    udf5 = _trim(params.get("udf5", ""))
-
-    # ---- final parts -------------------------------------------------------
-    parts = [
-        key, txnid, amount, productinfo, firstname, email,
-        udf1, udf2, udf3, udf4, udf5,
-        "", "", "", "", "", "",          # **exactly 6** empty fields
-        salt
-    ]
-    return "|".join(parts)
-
-
-def payu_hash(
-    params: Dict[str, Any],
-    salt: Optional[str] = None,
-    merchant_key: Optional[str] = None,
-) -> str:
-    """
-    Compute PayU SHA-512 hash (lowercase hex).
-
-    * `salt` – explicit salt for local testing; otherwise reads PAYU_SALT env var.
-    * `merchant_key` – optional override for the key (adds/replaces params['key']).
-    """
-    if merchant_key:
-        params = dict(params)
-        params["key"] = merchant_key
-
-    salt_val = _sanitize_env_value(salt if salt is not None else os.getenv("PAYU_SALT", ""))
-    if not salt_val:
-        raise ValueError("PayU SALT is missing – set PAYU_SALT env var or pass it explicitly")
-
-    seq = build_hash_sequence(params, salt_val)
-    return hashlib.sha512(seq.encode("utf-8")).hexdigest().lower()
-
-# Add this compatibility wrapper right after the `payu_hash` function
-def _payu_hash(params, salt=None, merchant_key=None):
-    """
-    Backwards-compatible wrapper expected by legacy call-sites.
-    Delegates to the canonical `payu_hash` implementation.
-    """
-    return payu_hash(params, salt=salt, merchant_key=merchant_key)
-
-# -------------------------------------------------------------------------
-# Helper for safe logging (replaces the real salt with <SALT>)
-# -------------------------------------------------------------------------
-def masked_sequence(full_seq: str, salt: str) -> str:
-    if not salt:
-        return full_seq.rsplit("|", 1)[0] + "|<SALT>" if "|" in full_seq else full_seq
-    if full_seq.endswith(salt):
-        return full_seq[:-len(salt)] + "<SALT>"
-    return full_seq.rsplit("|", 1)[0] + "|<SALT>" if "|" in full_seq else full_seq
-
-
-# -------------------------------------------------------------------------
-# Stand-alone test (run with `python payu_hash.py`)
-# -------------------------------------------------------------------------
-if __name__ == "__main__":
-    test_params = {
-        "key": "pqBnUd",
-        "txnid": "txn_1762602100_343f2d0a76e1",
-        "amount": "20000",
-        "productinfo": "1-year subscription",
-        "firstname": "Deepak Rao",               # ← **REAL NAME**
-        "email": "deepak.rao@acertax.com",
-        "udf1": "annual",
-        # udf2-udf5 are omitted → will be empty strings
-    }
-    TEST_SALT = "vVZxI7Upbecje3BdcJgjhP6kKmMppX0W"   # **only for local testing**
-
-    seq = build_hash_sequence(test_params, TEST_SALT)
-    masked = masked_sequence(seq, TEST_SALT)
-    computed = payu_hash(test_params, salt=TEST_SALT)
-
-    print("Masked pipe-sequence:")
-    print(masked)
-    print("Field count:", len(seq.split("|")), "(expected 18)\n")
-    print("Computed hash:")
-    print(computed)
-
-    expected = "aa0eead674b8d1e3ea15c0268f003fff7fe66fb8138f71bba5b644f55a30faf316bed6320d56ec9480787ef924c667563aa1d8e210475a18c6a3eb887b118b4a"
-    print("\nPayU expected:")
-    print(expected)
-    print("MATCH?", computed == expected)
-
 def verify_payu_response(posted: dict) -> bool:
     """
     Verify PayU response (compare posted 'hash' or 'sha2' with computed value).
@@ -3038,23 +2835,7 @@ def create_payment():
     """
 
 from flask import Flask, render_template, render_template_string, request, send_file, flash, redirect, url_for, session, jsonify
-@app.route("/compare_payu_seq", methods=["POST"])
-def compare_payu_seq():
-    our_seq = request.form.get("our_seq", "")
-    payu_seq = request.form.get("payu_seq", "")
-    def diff_lines(a, b):
-        # simple diff: show both and indicate equal/unequal
-        same = (a.strip() == b.strip())
-        return {"same": same, "our_seq": a, "payu_seq": b}
-    res = diff_lines(our_seq, payu_seq)
-    # render minimal result
-    return render_template_string("""
-      <h2>Compare result</h2>
-      <p>Sequences identical: <strong>{{same}}</strong></p>
-      <h3>Our sequence (masked)</h3><pre>{{our_seq}}</pre>
-      <h3>PayU provided sequence</h3><pre>{{payu_seq}}</pre>
-      <p><a href="#" onclick="history.back(); return false;">Back</a></p>
-    """, **res)
+
 
 # REPLACEMENT FUNCTION: Updates user subscription upon successful payment.
 @app.route("/payment_success", methods=["POST", "GET"])
@@ -3095,37 +2876,10 @@ def payment_fail():
     # TODO: log failure and show next steps to user
     return render_template("payment_failed.html", data=data)
 
-# dev-only – paste into main.py while debugging (only when app.debug is True)
-@app.route("/_debug_env", methods=["GET"])
-def _debug_env():
-    if not app.debug:
-        return ("Not allowed", 403)
-    key = os.environ.get("PAYU_MERCHANT_KEY", "")
-    masked = (key[:4] + "..." ) if key else ""
-    return f"PAYU key present: {bool(key)}; masked key: {masked}; PAYU_BASE_URL: {os.environ.get('PAYU_BASE_URL')}"
-
-def debug_payu_hash_print(params: dict):
-    # prints masked sequence (salt replaced) and computed hash (with actual salt)
-    key = str(params.get("key", os.environ.get("PAYU_MERCHANT_KEY", ""))).strip()
-    txnid = str(params.get("txnid", "")).strip()
-    amount = "{:.2f}".format(float(params.get("amount", "0") or 0))
-    productinfo = str(params.get("productinfo","")).strip()
-    firstname = str(params.get("firstname","")).strip()
-    email = str(params.get("email","")).strip()
-    udf = [str(params.get(f"udf{i}", "") or "").strip() for i in range(1, 11)]
-    salt = os.environ.get("PAYU_SALT", "").strip()
-
-    parts_display = [key, txnid, amount, productinfo, firstname, email] + udf + ["<SALT>"]
-    display_seq = "|".join(parts_display)
-    calc = _payu_hash(params)
-    print("HASH SEQ (masked):", display_seq)
-    print("SHA512(hash_seq):", calc)
-    # Do NOT print the raw salt in logs in production..
 
 from functools import wraps
 
 # --- Admin Functionality ---
-
 def admin_required(f):
     """Decorator to ensure a user is logged in and is an admin."""
     @wraps(f)

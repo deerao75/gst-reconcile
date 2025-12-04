@@ -5,8 +5,8 @@ from redis import Redis
 from rq import Worker, Connection
 
 # Define how many workers to run.
-# Start with 2 for your 2GB instance. If memory holds up, try 3 later.
-NUM_WORKERS = 2
+# Start with 4 for your 2GB instance. If memory holds up, try 3 later.
+NUM_WORKERS = 4
 
 def start_worker(worker_name):
     redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')

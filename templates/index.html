@@ -14,7 +14,8 @@
         <p class="hint">Reads <b>B2B</b> &amp; <b>B2B-CDNR</b> sheets.</p>
         <label class="filebtn">
           Choose File
-          <input id="file2b" type="file" name="gstr2b" accept=".xls,.xlsx" required>
+          <!-- REMOVED 'required' attribute here -->
+          <input id="file2b" type="file" name="gstr2b" accept=".xls,.xlsx">
         </label>
         <p id="file2bName" class="upload-confirm"></p>
       </div>
@@ -24,7 +25,8 @@
         <p class="hint">Requires .xlsx or .xls file.</p>
         <label class="filebtn">
           Choose File
-          <input id="filepr" type="file" name="purchase_register" accept=".xls,.xlsx" required>
+          <!-- REMOVED 'required' attribute here -->
+          <input id="filepr" type="file" name="purchase_register" accept=".xls,.xlsx">
         </label>
         <p id="fileprName" class="upload-confirm"></p>
       </div>
@@ -46,7 +48,10 @@
     </div>
 
     <div class="upload-actions">
-      <button type="button" id="instruction-btn" class="cta cta-secondary">Instructions for file upload</button>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <button type="button" id="instruction-btn" class="cta cta-secondary">Instructions for file upload</button>
+        <button type="button" id="custom-format-btn" class="cta cta-secondary">Customs Format (download)</button>
+      </div>
       <button type="submit" class="cta">Verify and Reconcile</button>
     </div>
 
@@ -61,10 +66,10 @@
   </form>
 </section>
 
-<!-- Instruction Modal -->
+<!-- Instruction Modal (Original) -->
 <div id="instruction-modal" class="instruction-modal">
   <div class="instruction-modal-content">
-    <span class="instruction-modal-close-btn">&times;</span>
+    <span class="instruction-modal-close-btn" id="inst-close-x">&times;</span>
     <h2>File Upload Instructions</h2>
     <p>To ensure the highest accuracy, please prepare your files according to the guidelines below.</p>
 
@@ -91,7 +96,48 @@
       <li><strong>Clean Numeric Values:</strong> All monetary columns (Taxable Value, CGST, etc.) must contain only numbers. Remove currency symbols (₹), commas, and text.</li>
       <li><strong>Correct GSTINs:</strong> Double-check that all GSTINs are in the correct 15-character format without extra spaces or special characters.</li>
     </ul>
-    <button type="button" class="instruction-modal-close-cta">Close</button>
+    <button type="button" class="instruction-modal-close-cta" id="inst-close-btn">Close</button>
+  </div>
+</div>
+
+<!-- Custom Format Download Modal -->
+<div id="custom-format-modal" class="instruction-modal">
+  <div class="instruction-modal-content">
+    <span class="instruction-modal-close-btn" id="custom-close-x">&times;</span>
+    <h2>Custom GSTR-2B Format Instructions</h2>
+    <p>If you are using the Custom Format option, please follow these strict guidelines:</p>
+
+    <hr>
+
+    <h3>How to fill the data:</h3>
+    <ul>
+        <li><strong>Unified Data:</strong> All Invoices, Credit Notes, Debit Notes, and Import of Goods data must be uploaded in a single Excel file.</li>
+        <li><strong>Sheet Name:</strong> The data must be placed in a specific sheet named exactly <strong>"B2B"</strong>.</li>
+        <li><strong>Headers:</strong> Please use the attached format. Do not change the header names in the first row.</li>
+    </ul>
+
+    <div style="background: #e9ecef; padding: 20px; border-radius: 8px; margin-top: 25px; text-align: center; border: 1px dashed #ccc;">
+        <p style="margin-top: 0; margin-bottom: 15px; font-weight: 600; color: #333;">Download the Excel Template:</p>
+
+        <!-- Download Button: Changed color to Light Orange -->
+        <a href="{{ url_for('static', filename='custom_gstr2b_format.xlsx') }}" class="cta" style="text-decoration: none; display: inline-block; background-color: #ffb74d; border-color: #ffb74d; color: #000; font-weight: 600;" download>
+            Download Custom Format (.xlsx)
+        </a>
+    </div>
+
+    <button type="button" class="instruction-modal-close-cta" id="custom-close-btn">Close</button>
+  </div>
+</div>
+
+<!-- NEW: Validation Modal (Missing Files) -->
+<div id="validation-modal" class="instruction-modal">
+  <div class="instruction-modal-content" style="max-width: 500px; text-align: center;">
+    <h2 style="color: #000; margin-top: 0;">Files Missing</h2>
+    <p style="font-size: 1.1rem; margin: 20px 0; text-align: center;">
+        Please upload both the <b>GSTR-2B</b> and <b>Purchase Register</b> files to proceed.
+    </p>
+    <hr>
+    <button type="button" class="instruction-modal-close-cta" id="validation-ok-btn" style="background-color: #ffb74d; color: #000; font-weight: 600; width: 120px; margin: 0 auto;">OK</button>
   </div>
 </div>
 
@@ -104,13 +150,16 @@
   margin-bottom: 2rem;
 }
 
+/* CHANGED: Secondary buttons are now Light Orange to match branding */
 .upload-actions .cta-secondary {
-    background-color: #6c757d;
-    border-color: #6c757d;
+    background-color: #ffb74d;
+    border-color: #ffb74d;
+    color: #000; /* This is Black */
+    font-weight: 600; /* Optional: Makes the black text pop more */
 }
 .upload-actions .cta-secondary:hover {
-    background-color: #5a6268;
-    border-color: #5a6268;
+    background-color: #ff9800;
+    border-color: #ff9800;
 }
 
 /* Styles for the instruction modal */
@@ -267,60 +316,7 @@
 .remark-box span.missing { color: #ff7b00; font-weight: 600; }
 </style>
 
-<!-- Processing overlay shown while Column mapping runs (show immediately on form submit) -->
-<style>
-  /* thin, unobtrusive overlay */
-  #processingOverlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    z-index: 9999;
-    background: rgba(0,0,0,0.35);
-    align-items: center;
-    justify-content: center;
-  }
-  .processing-box {
-    background: #fff;
-    color: #111;
-    padding: 18px 22px;
-    border-radius: 6px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.15);
-    font-family: inherit;
-    font-size: 15px;
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    min-width: 320px;
-    max-width: 90%;
-  }
-  .processing-spinner {
-    width: 18px;
-    height: 18px;
-    border: 3px solid #e9ecef;
-    border-top-color: #007bff;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* small responsive tweaks so the overlay doesn't jump layout on mobile */
-  @media (max-width:480px){
-    .processing-box { padding: 12px 14px; font-size: 14px; gap: 10px; }
-    .processing-spinner { width:14px; height:14px; border-width:2px; }
-  }
-</style>
-
-<div id="processingOverlay" role="status" aria-hidden="true" aria-live="polite">
-  <div class="processing-box" role="dialog" aria-modal="true">
-    <div class="processing-spinner" aria-hidden="true"></div>
-    <div>
-      <div style="font-weight:600;">Column mapping between 2B and Purchase Register in Progress</div>
-      <div style="font-size:12px; color:#666;">Please wait — this may take a few seconds.</div>
-    </div>
-  </div>
-</div>
-
-<!-- Larger processing overlay shown while Column mapping runs (show immediately on form submit) -->
+<!-- Processing overlay shown while Column mapping runs -->
 <style>
   /* Full-screen dimmer */
   #processingOverlay {
@@ -408,65 +404,7 @@
 </div>
 
 <script>
-(function() {
-  // Show the overlay
-  function showProcessingOverlay() {
-    try {
-      var ov = document.getElementById('processingOverlay');
-      if (!ov) return;
-      ov.style.display = 'flex';
-      ov.setAttribute('aria-hidden', 'false');
-      // prevent scrolling behind overlay
-      document.body.style.overflow = 'hidden';
-    } catch (e) {
-      console && console.warn && console.warn('processing overlay show error', e);
-    }
-  }
-
-  // Hide the overlay (safety, in case you want to hide it from other scripts)
-  function hideProcessingOverlay() {
-    try {
-      var ov = document.getElementById('processingOverlay');
-      if (!ov) return;
-      ov.style.display = 'none';
-      ov.setAttribute('aria-hidden', 'true');
-      document.body.style.overflow = '';
-    } catch (e) {
-      console && console.warn && console.warn('processing overlay hide error', e);
-    }
-  }
-
-  // Attach to the form submit(s) whose action points to /verify
-  document.addEventListener('DOMContentLoaded', function() {
-    try {
-      var forms = Array.prototype.slice.call(document.querySelectorAll('form'));
-      forms.forEach(function(f) {
-        var a = (f.getAttribute('action') || '').trim().toLowerCase();
-        if (a.endsWith('/verify') || a.endsWith('verify')) {
-          f.addEventListener('submit', function() {
-            setTimeout(showProcessingOverlay, 10);
-          }, {passive: true});
-        }
-      });
-
-      // Optional: attach to elements with data-target-verify (if you add them)
-      document.querySelectorAll('[data-target-verify]').forEach(function(el) {
-        el.addEventListener('click', function() {
-          setTimeout(showProcessingOverlay, 10);
-        }, {passive: true});
-      });
-
-      // If developer/testing wants to hide overlay programmatically, expose function
-      window._hideProcessingOverlay = hideProcessingOverlay;
-    } catch (e) {
-      console && console.warn && console.warn('processing overlay init error', e);
-    }
-  });
-})();
-</script>
-
-<script>
-  // Original script for file names
+  // 1. File Name Display Logic
   const f2b = document.getElementById('file2b');
   const fpr = document.getElementById('filepr');
   const n2b = document.getElementById('file2bName');
@@ -474,34 +412,78 @@
 
   function showName(input, labelEl) {
     if (input.files && input.files.length) {
-      labelEl.textContent = `${input.files[0].name}`;
+      labelEl.textContent = input.files[0].name;
     } else {
       labelEl.textContent = '';
     }
   }
-  f2b.addEventListener('change', () => showName(f2b, n2b));
-  fpr.addEventListener('change', () => showName(fpr, npr));
+  if(f2b) f2b.addEventListener('change', () => showName(f2b, n2b));
+  if(fpr) fpr.addEventListener('change', () => showName(fpr, npr));
 
-  // New script for the instruction modal
+  // 2. Consolidated Modal & Form Handling Script
   document.addEventListener('DOMContentLoaded', () => {
-    const modal = document.getElementById('instruction-modal');
-    const openBtn = document.getElementById('instruction-btn');
-    const closeBtns = document.querySelectorAll('.instruction-modal-close-btn, .instruction-modal-close-cta');
 
-    const openModal = () => { if (modal) modal.style.display = 'flex'; };
-    const closeModal = () => { if (modal) modal.style.display = 'none'; };
+    // --- Modal References ---
+    const instModal = document.getElementById('instruction-modal');
+    const customModal = document.getElementById('custom-format-modal');
+    const valModal = document.getElementById('validation-modal');
 
-    if(openBtn) {
-        openBtn.addEventListener('click', openModal);
-    }
+    // --- Open Buttons ---
+    const instBtn = document.getElementById('instruction-btn');
+    const customBtn = document.getElementById('custom-format-btn');
 
-    closeBtns.forEach(btn => btn.addEventListener('click', closeModal));
+    // --- Generic Close Button Handler ---
+    // This covers all X buttons and Close CTA buttons
+    const allCloseBtns = document.querySelectorAll('.instruction-modal-close-btn, .instruction-modal-close-cta');
 
-    window.addEventListener('click', (event) => {
-      if (event.target === modal) {
-        closeModal();
-      }
+    // --- Event Listeners for Opening Modals ---
+    if (instBtn) instBtn.addEventListener('click', () => { if(instModal) instModal.style.display = 'flex'; });
+    if (customBtn) customBtn.addEventListener('click', () => { if(customModal) customModal.style.display = 'flex'; });
+
+    // --- Event Listeners for Closing Modals ---
+    allCloseBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (instModal) instModal.style.display = 'none';
+            if (customModal) customModal.style.display = 'none';
+            if (valModal) valModal.style.display = 'none';
+        });
     });
+
+    // --- Close Modals on Click Outside ---
+    window.addEventListener('click', (event) => {
+      if (instModal && event.target === instModal) instModal.style.display = 'none';
+      if (customModal && event.target === customModal) customModal.style.display = 'none';
+      if (valModal && event.target === valModal) valModal.style.display = 'none';
+    });
+
+    // --- FORM SUBMISSION: VALIDATION + LOADING OVERLAY ---
+    const form = document.querySelector('.upload-form');
+    if (form) {
+        form.addEventListener('submit', function(e) {
+            const file2bInput = document.getElementById('file2b');
+            const filePrInput = document.getElementById('filepr');
+
+            // CHECK 1: Are files missing?
+            if (!file2bInput.value || !filePrInput.value) {
+                // STOP EVERYTHING
+                e.preventDefault();
+                e.stopPropagation();
+
+                // Show Validation Box
+                if (valModal) valModal.style.display = 'flex';
+                return false;
+            }
+
+            // CHECK 2: If files exist, Show Processing Overlay
+            const overlay = document.getElementById('processingOverlay');
+            if (overlay) {
+                overlay.style.display = 'flex';
+                overlay.setAttribute('aria-hidden', 'false');
+                document.body.style.overflow = 'hidden'; // Prevent scrolling
+            }
+            // Form will now proceed to submit to server...
+        });
+    }
   });
 </script>
 {% endblock %}

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Secure Payment</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding-top: 50px; }
+        .loader { border: 5px solid #f3f3f3; border-top: 5px solid #3498db; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin: 0 auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <h3>Initializing Secure Payment...</h3>
+    <div class="loader"></div>
+    <p>Please wait, do not refresh.</p>
+
+    <!-- Razorpay Button Script -->
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <script>
+        var options = {
+            "key": "{{ key_id }}",
+            "amount": "{{ order.amount }}",
+            "currency": "INR",
+            "name": "AcerGST",
+            "description": "Subscription Payment",
+            "order_id": "{{ order.id }}",
+            "handler": function (response){
+                // On success, populate the hidden form and submit to backend
+                document.getElementById('rp_payment_id').value = response.razorpay_payment_id;
+                document.getElementById('rp_order_id').value = response.razorpay_order_id;
+                document.getElementById('rp_signature').value = response.razorpay_signature;
+                document.getElementById('success_form').submit();
+            },
+            "prefill": {
+                "email": "{{ user_email }}",
+                "contact": "{{ user_contact }}"
+            },
+            "theme": {
+                "color": "#3399cc"
+            },
+            "modal": {
+                "ondismiss": function(){
+                    window.location.href = "/payment_fail";
+                }
+            }
+        };
+        var rzp1 = new Razorpay(options);
+
+        // Automatically open the payment modal
+        window.onload = function(){
+            rzp1.open();
+        };
+    </script>
+
+    <!-- Hidden form to send success data back to Flask -->
+    <form action="{{ url_for('payment_success') }}" method="POST" id="success_form">
+        <input type="hidden" name="razorpay_payment_id" id="rp_payment_id">
+        <input type="hidden" name="razorpay_order_id" id="rp_order_id">
+        <input type="hidden" name="razorpay_signature" id="rp_signature">
+        <input type="hidden" name="plan_name_hidden" value="{{ plan_name }}">
+    </form>
+</body>
+</html>

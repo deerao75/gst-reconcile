@@ -41,7 +41,11 @@
 
     .hidden { display:none; }
     .footer { margin-top:14px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); font-size:13px; }
-    a.btn { background:#1f2937; color:#e6e8ee; text-decoration:none; padding:8px 12px; border-radius:10px; }
+    .btn-group { display:flex; gap:10px; }
+    a.btn { background:#1f2937; color:#e6e8ee; text-decoration:none; padding:8px 12px; border-radius:10px; transition: background-color 0.2s; }
+    a.btn:hover { background:#374151; }
+    a.btn-primary { background:#4f8cff; color:#ffffff; }
+    a.btn-primary:hover { background:#3b82f6; }
   </style>
 </head>
 <body>
@@ -63,7 +67,10 @@
 
     <div class="footer">
       <span id="hint">Please keep this tab open.</span>
-      <a id="downloadBtn" class="btn hidden" href="#">Download result</a>
+      <div class="btn-group">
+        <a id="homeBtn" class="btn hidden" href="/">Start New</a>
+        <a id="downloadBtn" class="btn btn-primary hidden" href="#">Download result</a>
+      </div>
     </div>
   </div>
 
@@ -76,6 +83,7 @@
       const statePill = document.getElementById("statePill");
       const liveMsg  = document.getElementById("liveMsg");
       const dlBtn    = document.getElementById("downloadBtn");
+      const homeBtn = document.getElementById("homeBtn");
       const hint     = document.getElementById("hint");
       const spinner  = document.getElementById("spinner");
 
@@ -105,6 +113,7 @@
             bar.classList.remove("active");
             statePill.textContent = "finished";
             hint.textContent = "Your file is ready.";
+            homeBtn.classList.remove("hidden");
             dlBtn.classList.remove("hidden");
             dlBtn.href = `/download/${jobId}`;
             // optional auto-download:
@@ -117,6 +126,7 @@
             statePill.textContent = "failed";
             statePill.style.background = "#ef4444";
             hint.textContent = "The job failed. Please try again.";
+            homeBtn.classList.remove("hidden");
             console.error(j.error || "Job failed");
             return;
           }

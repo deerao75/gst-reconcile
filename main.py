@@ -2549,6 +2549,97 @@ def reconcile_confirm():
         flash("Upload session expired. Please re-upload the files.")
         return redirect(url_for("index"))
 
+    # ----- AUTO-CLEANUP: remove any previous jobs for this user -----
+    try:
+        from rq.job import Job
+        from rq.registry import StartedJobRegistry, ScheduledJobRegistry, FailedJobRegistry
+        # Use the same queue object you already have (q)
+        user_identifier = session.get("email") or request.form.get("user_id", "anon")
+
+        # 1) If we stored a last_job_id in session, try remove it first
+        old_job_id = session.get("last_job_id")
+        if old_job_id:
+            try:
+                old_job = Job.fetch(old_job_id, connection=rconn)
+                status = old_job.get_status()
+                if status not in ("finished", "failed", "stopped"):
+                    try:
+                        old_job.cancel()
+                    except Exception:
+                        pass
+                    try:
+                        old_job.delete()
+                    except Exception:
+                        pass
+            except Exception:
+                # ignore fetch/delete errors
+                pass
+            # forget it from session
+            session.pop("last_job_id", None)
+
+        # 2) Scan registries for any other jobs that belong to this user and delete them
+        try:
+            # queue job ids (queued)
+            queued_ids = list(q.job_ids) if hasattr(q, "job_ids") else []
+        except Exception:
+            queued_ids = []
+
+        try:
+            started_reg = StartedJobRegistry(queue=q, connection=rconn)
+            started_ids = started_reg.get_job_ids()
+        except Exception:
+            started_ids = []
+
+        try:
+            scheduled_reg = ScheduledJobRegistry(queue=q, connection=rconn)
+            scheduled_ids = scheduled_reg.get_job_ids()
+        except Exception:
+            scheduled_ids = []
+
+        try:
+            failed_reg = FailedJobRegistry(queue=q, connection=rconn)
+            failed_ids = failed_reg.get_job_ids()
+        except Exception:
+            failed_ids = []
+
+        candidate_ids = set(queued_ids) | set(started_ids) | set(scheduled_ids) | set(failed_ids)
+
+        for jid in candidate_ids:
+            try:
+                j = Job.fetch(jid, connection=rconn)
+            except Exception:
+                continue
+
+            # match either by explicit meta user_id or by the job args (process_reconcile's args include user_id)
+            meta_user = j.meta.get("user_id") if isinstance(j.meta, dict) else None
+            args_user = None
+            try:
+                # safe-check args length; user_id is passed as 4th arg in your enqueue call
+                if j.args and len(j.args) >= 4:
+                    args_user = j.args[3]
+            except Exception:
+                args_user = None
+
+            if (meta_user and str(meta_user) == str(user_identifier)) or (args_user and str(args_user) == str(user_identifier)):
+                try:
+                    st = j.get_status()
+                    if st not in ("finished", "failed", "stopped"):
+                        try:
+                            j.cancel()
+                        except Exception:
+                            pass
+                        try:
+                            j.delete()
+                        except Exception:
+                            pass
+                except Exception:
+                    # swallow per-job errors to avoid breaking upload flow
+                    pass
+    except Exception:
+        # Be very defensive: if RQ is unavailable, don't block the user from continuing
+        pass
+    # -----------------------------------------------------------------
+
     # Get the format choice from the session here, within the request context.
     gstr2b_format = session.get("gstr2b_format", "portal")
 
@@ -2604,7 +2695,11 @@ def reconcile_confirm():
         failure_ttl=86400
     )
 
-    # --- END: THIS IS THE FIX ---
+    # store job id in session for future auto-clean
+    try:
+        session["last_job_id"] = job.id
+    except Exception:
+        pass
 
     return render_template("progress.html", job_id=job.id)
 

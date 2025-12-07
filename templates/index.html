@@ -58,7 +58,7 @@
     <div class="remark-box">
       <h3>Mapping Remarks Explained</h3>
       <ul>
-        <li><b>Matched:</b> GSTIN and Invoice Number are concatenated to form a unique key after accounting for typo/syntax errors. If these match between PR and 2B and all other fields (CGST, SGST, IGST, Date) also align, the record is marked as <span class="matched">Matched</span>.</li>
+        <li><b>Matched:</b> GSTIN and Invoice Number are concatenated to form a unique key after accounting for all the typo/syntax errors. If these match between PR and 2B and all other fields (CGST, SGST, IGST, Date) also align, the record is marked as <span class="matched">Matched</span>.</li>
         <li><b>Almost Matched:</b> GSTIN + Invoice Number match, but one or more other fields (such as GSTIN, tax amounts or date) differ slightly. These are marked as <span class="almost">Almost Matched</span> for further review.</li>
         <li><b>Not Matched:</b> The record exists only on one side or have significant differences are noted as either <span class="missing">Missing in GSTR-2B</span> or <span class="missing">Missing in Purchase Register</span>.</li>
       </ul>

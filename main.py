@@ -550,16 +550,41 @@ def consolidate_by_key(
     inv_col: str,
     date_col: Optional[str],
     numeric_cols: List[str],
-    text_cols: Optional[List[str]] = None # <-- NEW: Accept text columns to preserve
+    text_cols: Optional[List[str]] = None
 ) -> pd.DataFrame:
     if df.empty:
         return df.copy()
 
     text_cols = text_cols or []
     work = df.copy()
+
+    # --- NEW: Remove Bottom "Total" Rows ---
+    # Strategy: identifying rows where the GSTIN or Invoice Number column
+    # explicitly says "Total" (common in Excel exports).
+    # We do NOT search the whole column, just check if the value is "Total"
+    # to avoid false positives.
+
+    def is_total_label(val):
+        s = str(val).strip().lower()
+        return s == "total" or s.startswith("total ")
+
+    # If a row has "Total" in the GSTIN or Invoice Number column, it is likely a footer.
+    # We filter these out before processing.
+    mask_is_total = work[gstin_col].apply(is_total_label) | work[inv_col].apply(is_total_label)
+    work = work[~mask_is_total].copy()
+
+    # Additionally, verify numeric columns. If a row has text like "Total" in a
+    # numeric column (which `parse_amount` would turn to 0), we should ensure
+    # we aren't keeping a footer row that just happened to have a blank GSTIN.
+    # (This step is often implicitly handled by the dropna/groupby, but being explicit helps).
+    # --- END NEW ---
+
     work["_GST_KEY"] = work[gstin_col].map(clean_gstin)
     work[inv_col] = work[inv_col].map(as_text)
     work["_INV_KEY"] = work[inv_col].map(inv_basic)
+
+    # Filter out rows where the keys became empty after cleaning (e.g. empty rows or pure text rows)
+    work = work[work["_GST_KEY"] != ""].copy()
 
     for c in numeric_cols:
         if c in work.columns:
@@ -574,17 +599,13 @@ def consolidate_by_key(
     for c in numeric_cols:
         if c in work.columns: agg_dict[c] = "sum"
 
-    # --- START: THIS IS THE FIX ---
-    # Explicitly tell the function to keep the first value of any text columns.
     for c in text_cols:
         if c in work.columns: agg_dict[c] = "first"
-    # --- END: THIS IS THE FIX ---
 
     agg_dict["_DATE_TMP"] = "min"
     agg_dict[gstin_col] = "first"
     agg_dict[inv_col] = "first"
 
-    # Add text_cols to the protected set to ensure they are not processed by other logic
     protected = set(["_GST_KEY", "_INV_KEY", "_DATE_TMP"] + [gstin_col, inv_col] + numeric_cols + text_cols)
     for c in work.columns:
         if c not in protected and c not in agg_dict:
@@ -595,7 +616,6 @@ def consolidate_by_key(
         grouped[date_col or "Invoice Date (derived)"] = grouped["_DATE_TMP"]
         grouped.drop(columns=["_DATE_TMP"], inplace=True)
     return grouped
-
 # -------------------- Reconciliation (with rounding + "Almost Match") --------------------
 def build_lookup(df_2b: pd.DataFrame, inv_col_2b: str, gstin_col_2b: str) -> Dict[str, List[int]]:
     lookup: Dict[str, List[int]] = defaultdict(list)
@@ -689,6 +709,91 @@ def build_pairwise_recon(
 
     merged = pd.merge(pr, b2, on=["_GST_KEY", "_INV_KEY"], how="outer")
 
+    # --- NEW: Aggressive Orphan Rescue Logic ---
+    # This detects matches where BOTH the GSTIN (typo) and Invoice (format) differ.
+    # Example: 07AA...Z0 vs 07AA...ZO  AND  INV/25-26/01 vs INV/2526/01
+
+    merged["_FUZZY_REASON"] = None
+
+    inv_pr_col_chk = f"{inv_pr}_PR" if inv_pr else None
+    inv_2b_col_chk = f"{inv_2b}_2B" if inv_2b else None
+    b2_cols_all_chk = [c for c in merged.columns if c.endswith("_2B")]
+
+    def fuzzy_gst(s):
+        """Normalize GSTIN: 0->O, Z->2, I/L->1, B->8"""
+        if not isinstance(s, str): return str(s) if s else ""
+        # We map everything to a standard set to ensure "0" matches "O"
+        return s.upper().replace('O', '0').replace('Z', '2').replace('I', '1').replace('L', '1').replace('B', '8')
+
+    def fuzzy_inv(s):
+        """Normalize Invoice: Remove all non-alphanumeric characters"""
+        if not isinstance(s, str): return str(s) if s else ""
+        # Strips /, -, space, dot to match "FY25-26" with "FY2526"
+        return re.sub(r'[^A-Z0-9]', '', s.upper())
+
+    # Map: (fuzzy_gst, fuzzy_inv) -> list of indices for 2B Orphans
+    b2_orphan_map = defaultdict(list)
+
+    # 1. Identify "Missing in PR" rows (2B Orphans) and store them
+    for idx in merged.index:
+        has_2b = pd.notna(merged.at[idx, inv_2b_col_chk]) if inv_2b_col_chk in merged.columns else False
+        has_pr = pd.notna(merged.at[idx, inv_pr_col_chk]) if inv_pr_col_chk in merged.columns else False
+
+        # If it's in 2B but not PR, it's a candidate for rescue
+        if has_2b and not has_pr:
+            g = merged.at[idx, "_GST_KEY"]
+            i = merged.at[idx, "_INV_KEY"]
+            # Create a simplified key
+            key = (fuzzy_gst(g), fuzzy_inv(i))
+            b2_orphan_map[key].append(idx)
+
+    drop_indices = []
+
+    # 2. Iterate "Missing in 2B" rows (PR Orphans) and look for a fuzzy match
+    for idx in merged.index:
+        has_2b = pd.notna(merged.at[idx, inv_2b_col_chk]) if inv_2b_col_chk in merged.columns else False
+        has_pr = pd.notna(merged.at[idx, inv_pr_col_chk]) if inv_pr_col_chk in merged.columns else False
+
+        # If it's in PR but not 2B
+        if has_pr and not has_2b:
+            g = merged.at[idx, "_GST_KEY"]
+            i = merged.at[idx, "_INV_KEY"]
+            key = (fuzzy_gst(g), fuzzy_inv(i))
+
+            # Check if we have a 2B orphan with the same fuzzy key
+            if key in b2_orphan_map:
+                candidates = b2_orphan_map[key]
+                if candidates:
+                    # Match found! Take the first candidate.
+                    match_idx = candidates.pop(0)
+                    drop_indices.append(match_idx)
+
+                    # Copy all 2B data columns from the matched 2B row to this PR row
+                    for c in b2_cols_all_chk:
+                        merged.at[idx, c] = merged.at[match_idx, c]
+
+                    # Determine reason for fuzzy match
+                    orig_2b_gst = merged.at[match_idx, "_GST_KEY"]
+                    orig_2b_inv = merged.at[match_idx, "_INV_KEY"]
+
+                    reasons = []
+                    # Check GSTIN difference (ignoring fuzzy normalization)
+                    if g != orig_2b_gst:
+                        reasons.append("GSTIN")
+                    # Check Invoice difference
+                    if i != orig_2b_inv:
+                        reasons.append("Invoice No")
+
+                    if not reasons: reasons.append("Typos")
+
+                    merged.at[idx, "_FUZZY_REASON"] = ", ".join(reasons)
+
+    # 3. Clean up: Remove the 2B orphan rows that we just merged into PR rows
+    if drop_indices:
+        merged.drop(index=drop_indices, inplace=True)
+        merged.reset_index(drop=True, inplace=True)
+    # --- END NEW LOGIC ---
+
     pr_cols_all = [c for c in merged.columns if c.endswith("_PR")]
     b2_cols_all = [c for c in merged.columns if c.endswith("_2B")]
 
@@ -720,6 +825,15 @@ def build_pairwise_recon(
 
     mapping, remarks, reason = [], [], []
     for idx, r in merged.iterrows():
+        # --- NEW: Apply Fuzzy Status ---
+        fuzzy_rsn = r.get("_FUZZY_REASON")
+        if fuzzy_rsn:
+            mapping.append("Almost Matched")
+            remarks.append("mis-match")
+            reason.append(fuzzy_rsn)
+            continue
+        # -------------------------------
+
         pr_inv_val = as_text(r.get(inv_pr_col, "")) if inv_pr_col in merged.columns else ""
         pr_gst_val = clean_gstin(r.get(gst_pr_col, "")) if gst_pr_col in merged.columns else ""
         b2_inv_val = as_text(r.get(inv_2b_col, "")) if inv_2b_col in merged.columns else ""
@@ -728,7 +842,6 @@ def build_pairwise_recon(
         pr_present = bool(pr_inv_val) or bool(pr_gst_val)
         b2_present = bool(b2_inv_val) or bool(b2_gst_val)
 
-        # This check is now robust and happens before mismatch calculation
         is_pr_only = pr_present and not b2_present
         is_2b_only = b2_present and not pr_present
 
@@ -773,19 +886,15 @@ def build_pairwise_recon(
         cdnr_mask = (out[source_sheet_col_2b] == "B2B-CDNR")
         out.loc[cdnr_mask, gst_2b_col] = out.loc[cdnr_mask, "_GST_KEY"]
 
-    # --- START: THIS IS THE CORRECTED LOGIC ---
     def get_final_type(row):
-        # Priority 1: Use value from Purchase Register if available.
         pr_type = as_text(row.get(inv_type_pr_col, '')) if inv_type_pr_col else ''
         if pr_type:
             return pr_type
 
-        # Priority 2: Use value from GSTR-2B if available.
         b2_type = as_text(row.get(inv_type_2b_col, '')) if inv_type_2b_col else ''
         if b2_type:
             return b2_type
 
-        # Priority 3: Fallback based on GSTR-2B source sheet and note type.
         note_type = row.get("_NOTE_TYPE_2B", "")
         if note_type == "credit": return "Credit Note"
         if note_type == "debit": return "Debit Note"
@@ -793,15 +902,12 @@ def build_pairwise_recon(
         source_sheet = row.get("_SOURCE_SHEET_2B", "")
         if source_sheet == "B2B": return "Invoice"
 
-        # Final fallback for items ONLY in Purchase Register (where 2B columns are NaN)
-        # If we got this far and it's not a 2B-only item, it must be an invoice from PR.
         if pd.notna(row.get(inv_pr_col)):
              return "Invoice"
 
-        return "" # Default to empty string if no type can be determined
+        return ""
 
     out["Invoice Type"] = out.apply(get_final_type, axis=1)
-    # --- END: THIS IS THE CORRECTED LOGIC ---
 
     def pick_name_col(columns, candidates):
         cnorm = [_norm(c) for c in candidates]

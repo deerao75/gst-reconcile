@@ -50,7 +50,7 @@
     <div class="upload-actions">
       <div style="display: flex; gap: 10px; flex-wrap: wrap;">
         <button type="button" id="instruction-btn" class="cta cta-secondary">Instructions for file upload</button>
-        <button type="button" id="custom-format-btn" class="cta cta-secondary">Customs Format (download)</button>
+        <button type="button" id="custom-format-btn" class="cta cta-secondary">Custom Format (download)</button>
       </div>
       <button type="submit" class="cta">Verify and Reconcile</button>
     </div>
@@ -58,9 +58,9 @@
     <div class="remark-box">
       <h3>Mapping Remarks Explained</h3>
       <ul>
-        <li><b>Matched:</b> GSTIN and Invoice Number are concatenated to form a unique key. If these match between PR and 2B and all other fields (CGST, SGST, IGST, Date) also align, the record is marked as <span class="matched">Matched</span>.</li>
-        <li><b>Almost Matched:</b> GSTIN + Invoice Number match perfectly, but one or more other fields (such as tax amounts or date) differ slightly. These are marked as <span class="almost">Almost Matched</span>.</li>
-        <li><b>Not Matched:</b> The record exists only on one side — either <span class="missing">Missing in GSTR-2B</span> or <span class="missing">Missing in Purchase Register</span>.</li>
+        <li><b>Matched:</b> GSTIN and Invoice Number are concatenated to form a unique key after accounting for typo/syntax errors. If these match between PR and 2B and all other fields (CGST, SGST, IGST, Date) also align, the record is marked as <span class="matched">Matched</span>.</li>
+        <li><b>Almost Matched:</b> GSTIN + Invoice Number match, but one or more other fields (such as GSTIN, tax amounts or date) differ slightly. These are marked as <span class="almost">Almost Matched</span> for further review.</li>
+        <li><b>Not Matched:</b> The record exists only on one side or have significant differences are noted as either <span class="missing">Missing in GSTR-2B</span> or <span class="missing">Missing in Purchase Register</span>.</li>
       </ul>
     </div>
   </form>
@@ -78,8 +78,8 @@
     <h3>GSTR-2B File Requirements</h3>
     <p>You have two options for your GSTR-2B file. Please select the correct format on the upload page:</p>
     <ul>
-        <li><strong>GST Portal Format (Recommended):</strong> Use the original, unmodified Excel file from the GST Portal where headers are on rows 5 and 6.</li>
-        <li><strong>Custom Format:</strong> If using a modified file, ensure all column headers are in the <strong>first row</strong>.</li>
+        <li><strong>GST Portal Format:</strong> Use the original, unmodified Excel file from the GST Portal where headers are on rows 5 and 6.</li>
+        <li><strong>Custom Format:</strong> If using a modified file, ensure to upload the 2B file as per the format provided and with headings in <strong>first row</strong>.</li>
     </ul>
     <p>For both formats, your file must contain sheets named exactly <strong>"B2B"</strong> and/or <strong>"B2B-CDNR"</strong>.</p>
 
@@ -87,7 +87,7 @@
     <ul>
         <li><strong>File Type:</strong> Must be an Excel file (.xlsx or .xls).</li>
         <li><strong>Headers:</strong> Use simple, clear, and generic headers in the <strong>first row</strong> (e.g., "Invoice Number", "Supplier GSTIN", "Invoice Date", "CGST").</li>
-        <li><strong>Essential Data:</strong> The file must contain columns for the supplier's GSTIN, invoice number, invoice date, taxable value, and tax amounts.</li>
+        <li><strong>Essential Data:</strong> The file must contain columns for the supplier's GSTIN, invoice number, invoice date, taxable value, and CGST, SGST and IGST amounts.</li>
     </ul>
 
     <h3>General Tips for Data Accuracy</h3>
@@ -111,7 +111,7 @@
 
     <h3>How to fill the data:</h3>
     <ul>
-        <li><strong>Unified Data:</strong> All Invoices, Credit Notes, Debit Notes, and Import of Goods data must be uploaded in a single Excel file.</li>
+        <li><strong>Unified Data:</strong> All Invoices, Credit Notes, Debit Notes, and Import of Goods data, if any, must be uploaded in a single Excel sheet.</li>
         <li><strong>Sheet Name:</strong> The data must be placed in a specific sheet named exactly <strong>"B2B"</strong>.</li>
         <li><strong>Headers:</strong> Please use the attached format. Do not change the header names in the first row.</li>
     </ul>

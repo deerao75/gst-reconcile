@@ -95,6 +95,30 @@
     .footer-links a:hover {
         text-decoration: underline;
     }
+
+    /* New styles for external websites list */
+    .footer-external-links {
+      display: block;
+      width: 100%;
+      margin-bottom: 12px;
+      font-size: 0.9rem;
+      color: #555;
+    }
+    .footer-external-item {
+        margin: 0 10px;
+        display: inline-block;
+    }
+    .footer-external-links a {
+        color: #555;
+        text-decoration: none;
+        font-weight: 700;
+        margin-left: 3px;
+    }
+    .footer-external-links a:hover {
+        color: #000;
+        text-decoration: underline;
+    }
+
     .footer-copyright {
       display: block;
       width: 100%;
@@ -304,7 +328,15 @@
       <a id="privacy-link">Privacy</a> |
       <a id="contact-link">Contact us</a>
     </div>
-    <!-- Line 2: Copyright -->
+
+    <!-- Line 2: Our Other Websites (New Section) -->
+    <div class="footer-external-links">
+        <span class="footer-external-item">LLP Website: <a href="http://www.acertax.com" target="_blank">www.acertax.com</a></span>
+        <span class="footer-external-item">GST Case Laws: <a href="http://www.acergst.com" target="_blank">www.acergst.com</a></span>
+        <span class="footer-external-item">Real Estate Services: <a href="http://www.acerres.com" target="_blank">www.acerres.com</a></span>
+    </div>
+
+    <!-- Line 3: Copyright -->
     <div class="footer-copyright">
       © 2025 AcerGST • <span class="muted">All Rights Reserved</span>
     </div>

@@ -3032,59 +3032,11 @@ def payu_request_hash(params: dict) -> str:
 @app.route("/create_payment", methods=["POST"])
 def create_payment():
     """
-    Creates and submits the payment request to PayU with the corrected hash.
+    Temporary Fix: Instead of connecting to PayU, this route
+    re-renders the subscribe page with a flag to show a 'Coming Soon' modal.
     """
-    # Read and format inputs
-    plan = request.form.get("plan", "half-yearly")
-    amount_raw = request.form.get("amount", "0")
-    productinfo = request.form.get("description", "Subscription").strip()
-    phone = request.form.get("phone", "")
-
-    try:
-        amount = "{:.2f}".format(float(amount_raw))
-    except (ValueError, TypeError):
-        amount = "0.00"
-
-    email = (session.get("email") or request.form.get("email") or "").strip()
-    if email and "@" in email:
-        firstname = email.split('@', 1)[0].lower()
-    else:
-        firstname = "guest"
-
-    # Read environment variables and validate
-    payu_key = os.environ.get("PAYU_MERCHANT_KEY", "").strip()
-    payu_salt = os.environ.get("PAYU_SALT", "").strip()
-    payu_url = os.environ.get("PAYU_BASE_URL", "https://test.payu.in/_payment").strip()
-
-    if not payu_key or not payu_salt:
-        return "<h2>Configuration Error: PAYU_MERCHANT_KEY or PAYU_SALT is not set.</h2>", 500
-
-    # Assemble all parameters for the form submission
-    txnid = f"txn_{int(time.time())}_{secrets.token_hex(6)}"
-    payu_params = {
-        "key": payu_key, "txnid": txnid, "amount": amount, "productinfo": productinfo,
-        "firstname": firstname, "email": email, "phone": phone,
-        "surl": url_for("payment_success", _external=True),
-        "furl": url_for("payment_fail", _external=True),
-        "udf1": plan, "udf2": "", "udf3": "", "udf4": "", "udf5": "",
-        "udf6": "", "udf7": "", "udf8": "", "udf9": "", "udf10": "",
-        "service_provider": "payu_paisa"
-    }
-
-    # Calculate the hash using the new, correct function
-    payu_params['hash'] = payu_request_hash(payu_params)
-
-    # Render the auto-submitting form
-    return f"""
-    <!doctype html><html><head><title>Redirecting to PayU...</title></head>
-    <body onload="document.getElementById('payu_form').submit();">
-      <h3>Redirecting to PayU...</h3>
-      <form id="payu_form" method="POST" action="{html.escape(payu_url)}">
-        {''.join([f'<input type="hidden" name="{k}" value="{html.escape(str(v))}">' for k, v in payu_params.items()])}
-        <input type="submit" value="Click here if you are not redirected">
-      </form>
-    </body></html>
-    """
+    # We pass 'show_modal=True' to the template so it knows to display the popup
+    return render_template("subscribe.html", show_modal=True)
 
 from flask import Flask, render_template, render_template_string, request, send_file, flash, redirect, url_for, session, jsonify
 
@@ -3222,7 +3174,7 @@ def start_trial():
         return redirect(url_for('subscribe'))
 
     user.subscribed = True
-    user.subscription_expiry_date = date.today() + timedelta(days=7)
+    user.subscription_expiry_date = date.today() + timedelta(days=30)
     db.session.commit()
 
     flash('Your 7-day free trial has started! You now have full access.', 'success')

@@ -2316,18 +2316,183 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         combined_df = combined_df[cols]
 
-    def _autosize_ws(ws, df, min_w=12, max_w=48):
-        sample = df.head(200)
+        def _autosize_ws(ws, df, min_w=12, max_w=48, num_fmt=None):
+            sample = df.head(200)
+            for col_idx, col_name in enumerate(df.columns):
+                # 1. Calculate Width
+                header_len = len(str(col_name)) + 4
+                try:
+                    content_len = int(sample[col_name].astype(str).map(len).max())
+                    if isinstance(content_len, float) and math.isnan(content_len):
+                        content_len = 0
+                except Exception:
+                    content_len = 0
+                width = max(min_w, min(max_w, max(header_len, content_len + 2)))
+
+                # 2. Determine Format
+                # Apply number format if column name suggests it is a financial amount
+                curr_fmt = None
+                if num_fmt:
+                    c_str = str(col_name).lower()
+                    # Positive keywords: likely an amount
+                    is_amt = any(x in c_str for x in ['cgst', 'sgst', 'igst', 'cess', 'tax', 'amount', 'value', 'rate', 'total', 'diff', 'sum'])
+                    # Negative keywords: exclude IDs, Dates, Periods, Numbers
+                    is_excl = any(x in c_str for x in ['date', 'gstin', 'id', 'month', 'year', 'period', 'no', 'number', 'row'])
+
+                    # Special logic: "Invoice Value" is an amount, "Invoice Number" is not.
+                    # If it has an amount keyword AND is not in the exclusion list, format it.
+                    if is_amt and not is_excl:
+                        curr_fmt = num_fmt
+
+                ws.set_column(col_idx, col_idx, width, curr_fmt)
+
+    # --------------------------------------------------------------------------
+    # MODIFIED: Helper to autosize AND apply number formatting
+    # --------------------------------------------------------------------------
+    def _format_and_autosize(ws, df, num_format):
+        """
+        Autosize columns and apply number format to numeric-looking columns.
+        """
+        # Removed "credit" from this list to avoid matching "Credit/Debit Note Type"
+        numeric_keywords = ["tax", "value", "amount", "cess", "cgst", "sgst",
+                            "igst", "rate", "total", "cash", "diff"]
+
+        # Explicit exclusions for Date, ID, and Type columns
+        exclude_cols = ["tax period", "filing period", "gstr-1 period", "return period",
+                        "invoice date", "filing date", "note date", "document date", "id",
+                        "note number", "note no", "note type", "supply type", "invoice no",
+                        "invoice number", "document number"]
+
         for col_idx, col_name in enumerate(df.columns):
+            col_str = str(col_name).lower()
+
+            # Determine max width
             header_len = len(str(col_name)) + 4
             try:
-                content_len = int(sample[col_name].astype(str).map(len).max())
+                sample = df[col_name].head(200).astype(str)
+                content_len = int(sample.map(len).max())
                 if isinstance(content_len, float) and math.isnan(content_len):
                     content_len = 0
             except Exception:
                 content_len = 0
-            width = max(min_w, min(max_w, max(header_len, content_len + 2)))
-            ws.set_column(col_idx, col_idx, width)
+
+            width = max(12, min(48, max(header_len, content_len + 2)))
+
+            # Check if this column should be numeric formatted
+            is_numeric_col = any(k in col_str for k in numeric_keywords)
+            is_excluded = any(ex in col_str for ex in exclude_cols)
+
+            if is_numeric_col and not is_excluded:
+                ws.set_column(col_idx, col_idx, width, num_format)
+            else:
+                ws.set_column(col_idx, col_idx, width)
+
+    # --------------------------------------------------------------------------
+    # Generic Helper to Fix Date/Period Displays
+    # --------------------------------------------------------------------------
+    def _fix_datetime_formatting(df):
+        """
+        1. Columns with 'period' or 'month' -> Format as MMM-YYYY (Sep-2025)
+        2. Columns with 'filing date' -> Format as DD-MM-YYYY (01-09-2025)
+        """
+        if df.empty: return df
+        df = df.copy()
+
+        for col in df.columns:
+            cn = str(col).lower()
+
+            # Logic 1: Periods
+            if ("period" in cn or "month" in cn) and "invoice date" not in cn:
+                try:
+                    s = pd.to_datetime(df[col], errors='coerce')
+                    if s.notna().sum() > 0:
+                        df.loc[s.notna(), col] = s[s.notna()].dt.strftime("%b-%Y")
+                except: pass
+
+            # Logic 2: Filing Dates
+            elif "filing date" in cn:
+                try:
+                    s = pd.to_datetime(df[col], errors='coerce')
+                    if s.notna().sum() > 0:
+                        df.loc[s.notna(), col] = s[s.notna()].dt.strftime("%d-%m-%Y")
+                except: pass
+
+        return df
+
+    # --------------------------------------------------------------------------
+    # FIX: Robust Numeric Conversion (Handles Commas & STRICT Exclusions)
+    # --------------------------------------------------------------------------
+    def _ensure_numeric_types(df):
+        """
+        Converts string-based number columns to float, handling commas.
+        """
+        if df.empty: return df
+        df = df.copy()
+
+        # Removed "credit" to prevent treating "Credit Note Type" as a number
+        numeric_keywords = ["tax", "value", "amount", "cess", "cgst", "sgst",
+                            "igst", "rate", "total", "cash", "diff"]
+
+        # Strong exclusions for Note details
+        exclude_cols = ["tax period", "filing period", "gstr-1 period", "return period",
+                        "invoice date", "filing date", "note date", "document date", "id",
+                        "note number", "note no", "note type", "supply type", "invoice no",
+                        "invoice number", "document number"]
+
+        for col in df.columns:
+            cn = str(col).lower()
+
+            is_numeric_candidate = any(k in cn for k in numeric_keywords)
+            is_excluded = any(ex in cn for ex in exclude_cols)
+
+            if is_numeric_candidate and not is_excluded:
+                try:
+                    # 1. Convert to string
+                    # 2. Remove commas
+                    # 3. Convert to numeric
+                    df[col] = (df[col].astype(str)
+                                     .str.replace(',', '')
+                                     .str.replace('nan', '', case=False)
+                                     .str.strip())
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+                except:
+                    pass
+        return df
+
+    # --- Apply Data Fixes ---
+
+    # 1. Apply Date/Period Fixes (String formatting)
+    if 'pr_comments' in locals():
+        pr_comments = _fix_datetime_formatting(pr_comments)
+    if 'gstr2b_comments' in locals():
+        gstr2b_comments = _fix_datetime_formatting(gstr2b_comments)
+    if 'gstr2b_cdnr_comments' in locals():
+        gstr2b_cdnr_comments = _fix_datetime_formatting(gstr2b_cdnr_comments)
+
+    # Fix raw DFs if used as fallbacks
+    if 'df_b2b_raw' in locals() and df_b2b_raw is not None:
+        df_b2b_raw = _fix_datetime_formatting(df_b2b_raw)
+    if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None:
+        df_cdnr_raw = _fix_datetime_formatting(df_cdnr_raw)
+
+    # 2. Apply Numeric Conversions (Floats)
+    if 'pr_comments' in locals():
+        pr_comments = _ensure_numeric_types(pr_comments)
+    if 'gstr2b_comments' in locals() and not gstr2b_comments.empty:
+        gstr2b_comments = _ensure_numeric_types(gstr2b_comments)
+    if 'gstr2b_cdnr_comments' in locals() and not gstr2b_cdnr_comments.empty:
+        gstr2b_cdnr_comments = _ensure_numeric_types(gstr2b_cdnr_comments)
+
+    # Create export versions
+    if 'df_b2b_raw' in locals() and not df_b2b_raw.empty:
+        df_b2b_raw_export = _ensure_numeric_types(df_b2b_raw)
+    else:
+        df_b2b_raw_export = df_b2b_raw if 'df_b2b_raw' in locals() else pd.DataFrame()
+
+    if 'df_cdnr_raw' in locals() and not df_cdnr_raw.empty:
+        df_cdnr_raw_export = _ensure_numeric_types(df_cdnr_raw)
+    else:
+        df_cdnr_raw_export = df_cdnr_raw if 'df_cdnr_raw' in locals() else pd.DataFrame()
 
     output = io.BytesIO()
     with pd.ExcelWriter(
@@ -2340,19 +2505,17 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         # --- Formats ---
         header_fmt = wb.add_format({"bold": True})
         comment_highlight_fmt = wb.add_format({"bg_color": "#FFF2CC", "align": "left", "valign": "vcenter"})
+        num_fmt = wb.add_format({"num_format": "#,##0.00", "align": "right", "valign": "vcenter"})
 
-        # Dashboard specific formats
         dash_title_fmt = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "font_size": 12})
         dash_table_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#f2f2f2"})
         dash_table_txt = wb.add_format({"border": 1, "align": "left", "valign": "vcenter"})
         dash_table_num = wb.add_format({"num_format": "#,##0.00", "border": 1, "align": "right", "valign": "vcenter"})
         dash_table_lbl = wb.add_format({"bold": True, "border": 1, "align": "left", "valign": "vcenter"})
 
-        # Notes formats (Text wrap enabled for merged cells)
         note_title_fmt = wb.add_format({"bold": True, "font_size": 11, "valign": "top", "underline": True})
         note_text_fmt = wb.add_format({"text_wrap": True, "valign": "top", "font_size": 10})
 
-        # --- Helper: Highlight Columns ---
         def _highlight_columns(ws, df, col_names, fmt, include_header: bool = True):
             try:
                 if df is None: return
@@ -2367,12 +2530,11 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 pass
 
         # ==========================================
-        # 1. DASHBOARD SHEET (First Tab)
+        # 1. DASHBOARD SHEET
         # ==========================================
         ws2 = wb.add_worksheet("Dashboard")
         writer.sheets["Dashboard"] = ws2
 
-        # --- Table 1: Summary ---
         statuses = ["Matched", "Almost Matched", "Not Matched", None]
         rowlabels = ["CGST", "SGST", "IGST", "Total"]
 
@@ -2380,7 +2542,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
             if not col_name or col_name not in combined_df.columns:
                 return 0.0
             mask = (combined_df["Mapping"] == status) if status else slice(None)
-            return float(pd.to_numeric(combined_df.loc[mask, col_name], errors="coerce").fillna(0).sum())
+            s = combined_df.loc[mask, col_name].astype(str).str.replace(',', '').str.replace('nan', '')
+            return float(pd.to_numeric(s, errors="coerce").fillna(0).sum())
 
         def _block_vals(status):
             cg_pr = _sum_component(status, pair_cols.get("cgst_pr_col"))
@@ -2396,7 +2559,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         total_cols = 1 + len(statuses) * 2
         last_col_idx = total_cols - 1
-
         ws2.merge_range(0, 0, 0, last_col_idx, "Summary - GSTR 2B vs. Purchase Register Reconciliation", dash_title_fmt)
 
         top_row = 2
@@ -2413,7 +2575,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         ws2.write(sub_row, 0, "Report", dash_table_hdr)
         col = 1
         for _ in statuses:
-            ws2.write(sub_row, col,     "PR",      dash_table_hdr)
+            ws2.write(sub_row, col, "PR", dash_table_hdr)
             ws2.write(sub_row, col + 1, "GSTR 2B", dash_table_hdr)
             col += 2
 
@@ -2429,7 +2591,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws2.write_number(r, col+1, v, dash_table_num)
             col += 2
 
-        # NEW: Add Note below Summary Table
         note_row_idx = data_start + len(rowlabels)
         ws2.merge_range(note_row_idx, 0, note_row_idx, last_col_idx,
                         "Note: The above table summary includes B2B (including RCM and POS) and CDNR values from GSTR 2B. Does not include imports or ISD",
@@ -2440,10 +2601,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         for c in range(1, total_cols):
             ws2.set_column(c, c, 15)
 
-        # --- Table 2: ITC ---
+        # --- ITC Table ---
         end_of_table_row = data_start + len(rowlabels) - 1
         new_table_start = end_of_table_row + 3
-
         ws2.merge_range(new_table_start, 0, new_table_start, 5, "ITC for GSTR 3B (for reference purposes only)", dash_title_fmt)
 
         itc_headers = ["Details", "Code", "Integrated Tax (₹)", "Central Tax (₹)", "State/UT Tax (₹)", "CESS (₹)"]
@@ -2484,13 +2644,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         ws2.set_column(0, 0, 50)
         ws2.set_column(1, 5, 16)
 
-        # --- Notes Section (Right of ITC Table) ---
-        # Write across columns H to R (indices 7 to 17) using merge_range
-        notes_col = 7  # Column H
+        notes_col = 7
         notes_start_row = new_table_start + 1
-
         ws2.write(notes_start_row, notes_col, "Notes:", note_title_fmt)
-
         itc_notes_list = [
             "1. 4A1 (Import of goods): Data populated from the IMPG sheet in GSTR 2B.",
             "2. 4A2 (Import of Services): User to input.",
@@ -2501,9 +2657,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
             "7. 4B2 (Temporary Reverse): Data populated from the Not Matched line items.",
             "8. 4D1 (Past Period ITC): Data populated from the Matched and Almost Matched line items for lines matching with past period GSTR 2B."
         ]
-
         for i, note in enumerate(itc_notes_list):
-            # Merge across ~11 columns to allow text to flow freely without widening Column H
             ws2.merge_range(notes_start_row + 1 + i, notes_col, notes_start_row + 1 + i, notes_col + 10, note, note_text_fmt)
 
         # ==========================================
@@ -2514,7 +2668,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         ws.freeze_panes(1, 0)
         ws.autofilter(0, 0, len(combined_df), max(0, combined_df.shape[1] - 1))
         ws.set_row(0, None, header_fmt)
-        _autosize_ws(ws, combined_df)
+        _format_and_autosize(ws, combined_df, num_fmt)
         _highlight_columns(ws, combined_df, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
 
         # ==========================================
@@ -2527,13 +2681,15 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         ws3.freeze_panes(1, 0)
         ws3.autofilter(0, 0, len(pr_comments), max(0, pr_comments.shape[1] - 1))
         ws3.set_row(0, None, header_fmt)
-        _autosize_ws(ws3, pr_comments)
+        _format_and_autosize(ws3, pr_comments, num_fmt)
         _highlight_columns(ws3, pr_comments, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
 
         # B2B Comments
         try:
             if 'df_b2b_raw' in locals() and df_b2b_raw is not None and not df_b2b_raw.empty:
-                to_write = gstr2b_comments.copy() if 'gstr2b_comments' in locals() else df_b2b_raw.copy()
+                # Use the EXPORT version that has types fixed
+                to_write = gstr2b_comments.copy() if 'gstr2b_comments' in locals() else df_b2b_raw_export.copy()
+
                 for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR"]:
                     if _col not in to_write.columns: to_write[_col] = ""
 
@@ -2550,7 +2706,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws4.freeze_panes(1, 0)
                 ws4.autofilter(0, 0, len(to_write), max(0, to_write.shape[1] - 1))
                 ws4.set_row(0, None, header_fmt)
-                _autosize_ws(ws4, to_write)
+                _format_and_autosize(ws4, to_write, num_fmt)
                 _highlight_columns(ws4, to_write, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
             else:
                 pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]).to_excel(writer, index=False, sheet_name="GSTR 2B B2B - Comments")
@@ -2561,7 +2717,8 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         # CDNR Comments
         try:
             if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None and not df_cdnr_raw.empty:
-                to_write_cd = gstr2b_cdnr_comments.copy() if 'gstr2b_cdnr_comments' in locals() else df_cdnr_raw.copy()
+                to_write_cd = gstr2b_cdnr_comments.copy() if 'gstr2b_cdnr_comments' in locals() else df_cdnr_raw_export.copy()
+
                 for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR"]:
                     if _col not in to_write_cd.columns: to_write_cd[_col] = ""
 
@@ -2578,7 +2735,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws5.freeze_panes(1, 0)
                 ws5.autofilter(0, 0, len(to_write_cd), max(0, to_write_cd.shape[1] - 1))
                 ws5.set_row(0, None, header_fmt)
-                _autosize_ws(ws5, to_write_cd)
+                _format_and_autosize(ws5, to_write_cd, num_fmt)
                 _highlight_columns(ws5, to_write_cd, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
             else:
                 pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]).to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")

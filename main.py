@@ -2347,11 +2347,12 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws.set_column(col_idx, col_idx, width, curr_fmt)
 
     # --------------------------------------------------------------------------
-    # MODIFIED: Helper to autosize AND apply number formatting
+    # MODIFIED: Helper to autosize AND apply number/text formatting
     # --------------------------------------------------------------------------
-    def _format_and_autosize(ws, df, num_format):
+    def _format_and_autosize(ws, df, num_format, text_format):
         """
         Autosize columns and apply number format to numeric-looking columns.
+        Applies text_format (Aptos 10) to everything else.
         """
         # Removed "credit" from this list to avoid matching "Credit/Debit Note Type"
         numeric_keywords = ["tax", "value", "amount", "cess", "cgst", "sgst",
@@ -2385,55 +2386,49 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
             if is_numeric_col and not is_excluded:
                 ws.set_column(col_idx, col_idx, width, num_format)
             else:
-                ws.set_column(col_idx, col_idx, width)
+                ws.set_column(col_idx, col_idx, width, text_format)
+
+    # --------------------------------------------------------------------------
+    # NEW: Helper to Force Header Color & Font
+    # --------------------------------------------------------------------------
+    def _apply_header_style(ws, df, header_fmt):
+        """
+        Pandas to_excel uses its own header format. We must overwrite the
+        first row cells explicitly to apply the background color and font.
+        """
+        for col_idx, col_name in enumerate(df.columns):
+            ws.write(0, col_idx, col_name, header_fmt)
 
     # --------------------------------------------------------------------------
     # Generic Helper to Fix Date/Period Displays
     # --------------------------------------------------------------------------
     def _fix_datetime_formatting(df):
-        """
-        1. Columns with 'period' or 'month' -> Format as MMM-YYYY (Sep-2025)
-        2. Columns with 'filing date' -> Format as DD-MM-YYYY (01-09-2025)
-        """
         if df.empty: return df
         df = df.copy()
-
         for col in df.columns:
             cn = str(col).lower()
-
-            # Logic 1: Periods
             if ("period" in cn or "month" in cn) and "invoice date" not in cn:
                 try:
                     s = pd.to_datetime(df[col], errors='coerce')
                     if s.notna().sum() > 0:
                         df.loc[s.notna(), col] = s[s.notna()].dt.strftime("%b-%Y")
                 except: pass
-
-            # Logic 2: Filing Dates
             elif "filing date" in cn:
                 try:
                     s = pd.to_datetime(df[col], errors='coerce')
                     if s.notna().sum() > 0:
                         df.loc[s.notna(), col] = s[s.notna()].dt.strftime("%d-%m-%Y")
                 except: pass
-
         return df
 
     # --------------------------------------------------------------------------
-    # FIX: Robust Numeric Conversion (Handles Commas & STRICT Exclusions)
+    # FIX: Robust Numeric Conversion
     # --------------------------------------------------------------------------
     def _ensure_numeric_types(df):
-        """
-        Converts string-based number columns to float, handling commas.
-        """
         if df.empty: return df
         df = df.copy()
-
-        # Removed "credit" to prevent treating "Credit Note Type" as a number
         numeric_keywords = ["tax", "value", "amount", "cess", "cgst", "sgst",
                             "igst", "rate", "total", "cash", "diff"]
-
-        # Strong exclusions for Note details
         exclude_cols = ["tax period", "filing period", "gstr-1 period", "return period",
                         "invoice date", "filing date", "note date", "document date", "id",
                         "note number", "note no", "note type", "supply type", "invoice no",
@@ -2441,58 +2436,34 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         for col in df.columns:
             cn = str(col).lower()
-
             is_numeric_candidate = any(k in cn for k in numeric_keywords)
             is_excluded = any(ex in cn for ex in exclude_cols)
-
             if is_numeric_candidate and not is_excluded:
                 try:
-                    # 1. Convert to string
-                    # 2. Remove commas
-                    # 3. Convert to numeric
                     df[col] = (df[col].astype(str)
                                      .str.replace(',', '')
                                      .str.replace('nan', '', case=False)
                                      .str.strip())
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-                except:
-                    pass
+                except: pass
         return df
 
     # --- Apply Data Fixes ---
+    if 'pr_comments' in locals(): pr_comments = _fix_datetime_formatting(pr_comments)
+    if 'gstr2b_comments' in locals(): gstr2b_comments = _fix_datetime_formatting(gstr2b_comments)
+    if 'gstr2b_cdnr_comments' in locals(): gstr2b_cdnr_comments = _fix_datetime_formatting(gstr2b_cdnr_comments)
+    if 'df_b2b_raw' in locals() and df_b2b_raw is not None: df_b2b_raw = _fix_datetime_formatting(df_b2b_raw)
+    if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None: df_cdnr_raw = _fix_datetime_formatting(df_cdnr_raw)
 
-    # 1. Apply Date/Period Fixes (String formatting)
-    if 'pr_comments' in locals():
-        pr_comments = _fix_datetime_formatting(pr_comments)
-    if 'gstr2b_comments' in locals():
-        gstr2b_comments = _fix_datetime_formatting(gstr2b_comments)
-    if 'gstr2b_cdnr_comments' in locals():
-        gstr2b_cdnr_comments = _fix_datetime_formatting(gstr2b_cdnr_comments)
+    if 'pr_comments' in locals(): pr_comments = _ensure_numeric_types(pr_comments)
+    if 'gstr2b_comments' in locals() and not gstr2b_comments.empty: gstr2b_comments = _ensure_numeric_types(gstr2b_comments)
+    if 'gstr2b_cdnr_comments' in locals() and not gstr2b_cdnr_comments.empty: gstr2b_cdnr_comments = _ensure_numeric_types(gstr2b_cdnr_comments)
 
-    # Fix raw DFs if used as fallbacks
-    if 'df_b2b_raw' in locals() and df_b2b_raw is not None:
-        df_b2b_raw = _fix_datetime_formatting(df_b2b_raw)
-    if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None:
-        df_cdnr_raw = _fix_datetime_formatting(df_cdnr_raw)
+    if 'df_b2b_raw' in locals() and not df_b2b_raw.empty: df_b2b_raw_export = _ensure_numeric_types(df_b2b_raw)
+    else: df_b2b_raw_export = df_b2b_raw if 'df_b2b_raw' in locals() else pd.DataFrame()
 
-    # 2. Apply Numeric Conversions (Floats)
-    if 'pr_comments' in locals():
-        pr_comments = _ensure_numeric_types(pr_comments)
-    if 'gstr2b_comments' in locals() and not gstr2b_comments.empty:
-        gstr2b_comments = _ensure_numeric_types(gstr2b_comments)
-    if 'gstr2b_cdnr_comments' in locals() and not gstr2b_cdnr_comments.empty:
-        gstr2b_cdnr_comments = _ensure_numeric_types(gstr2b_cdnr_comments)
-
-    # Create export versions
-    if 'df_b2b_raw' in locals() and not df_b2b_raw.empty:
-        df_b2b_raw_export = _ensure_numeric_types(df_b2b_raw)
-    else:
-        df_b2b_raw_export = df_b2b_raw if 'df_b2b_raw' in locals() else pd.DataFrame()
-
-    if 'df_cdnr_raw' in locals() and not df_cdnr_raw.empty:
-        df_cdnr_raw_export = _ensure_numeric_types(df_cdnr_raw)
-    else:
-        df_cdnr_raw_export = df_cdnr_raw if 'df_cdnr_raw' in locals() else pd.DataFrame()
+    if 'df_cdnr_raw' in locals() and not df_cdnr_raw.empty: df_cdnr_raw_export = _ensure_numeric_types(df_cdnr_raw)
+    else: df_cdnr_raw_export = df_cdnr_raw if 'df_cdnr_raw' in locals() else pd.DataFrame()
 
     output = io.BytesIO()
     with pd.ExcelWriter(
@@ -2502,19 +2473,54 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
     ) as writer:
         wb = writer.book
 
-        # --- Formats ---
-        header_fmt = wb.add_format({"bold": True})
-        comment_highlight_fmt = wb.add_format({"bg_color": "#FFF2CC", "align": "left", "valign": "vcenter"})
-        num_fmt = wb.add_format({"num_format": "#,##0.00", "align": "right", "valign": "vcenter"})
+        # --- Formats (Global Font: Aptos 10) ---
 
-        dash_title_fmt = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "font_size": 12})
-        dash_table_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#f2f2f2"})
-        dash_table_txt = wb.add_format({"border": 1, "align": "left", "valign": "vcenter"})
-        dash_table_num = wb.add_format({"num_format": "#,##0.00", "border": 1, "align": "right", "valign": "vcenter"})
-        dash_table_lbl = wb.add_format({"bold": True, "border": 1, "align": "left", "valign": "vcenter"})
+        # Header: Light Orange Background (#FCE4D6), Bold, Border
+        header_fmt = wb.add_format({
+            "bold": True,
+            "bg_color": "#FCE4D6",  # Light Orange
+            "border": 1,
+            "font_name": "Aptos",
+            "font_size": 10,
+            "valign": "vcenter",
+            "align": "left"
+        })
 
-        note_title_fmt = wb.add_format({"bold": True, "font_size": 11, "valign": "top", "underline": True})
-        note_text_fmt = wb.add_format({"text_wrap": True, "valign": "top", "font_size": 10})
+        # Text: Aptos 10, Left Align
+        text_fmt = wb.add_format({
+            "font_name": "Aptos",
+            "font_size": 10,
+            "valign": "vcenter",
+            "align": "left"
+        })
+
+        # Numbers: Aptos 10, Right Align, Comma, 2 Decimals
+        num_fmt = wb.add_format({
+            "num_format": "#,##0.00",
+            "align": "right",
+            "valign": "vcenter",
+            "font_name": "Aptos",
+            "font_size": 10
+        })
+
+        # Highlight: Light Yellow
+        comment_highlight_fmt = wb.add_format({
+            "bg_color": "#FFF2CC",
+            "align": "left",
+            "valign": "vcenter",
+            "font_name": "Aptos",
+            "font_size": 10
+        })
+
+        # Dashboard Formats (All Aptos 10)
+        dash_title_fmt = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "font_size": 12, "font_name": "Aptos"})
+        dash_table_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#FCE4D6", "font_name": "Aptos", "font_size": 10}) # Updated color
+        dash_table_txt = wb.add_format({"border": 1, "align": "left", "valign": "vcenter", "font_name": "Aptos", "font_size": 10})
+        dash_table_num = wb.add_format({"num_format": "#,##0.00", "border": 1, "align": "right", "valign": "vcenter", "font_name": "Aptos", "font_size": 10})
+        dash_table_lbl = wb.add_format({"bold": True, "border": 1, "align": "left", "valign": "vcenter", "font_name": "Aptos", "font_size": 10})
+
+        note_title_fmt = wb.add_format({"bold": True, "font_size": 11, "valign": "top", "underline": True, "font_name": "Aptos"})
+        note_text_fmt = wb.add_format({"text_wrap": True, "valign": "top", "font_size": 10, "font_name": "Aptos"})
 
         def _highlight_columns(ws, df, col_names, fmt, include_header: bool = True):
             try:
@@ -2594,7 +2600,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         note_row_idx = data_start + len(rowlabels)
         ws2.merge_range(note_row_idx, 0, note_row_idx, last_col_idx,
                         "Note: The above table summary includes B2B (including RCM and POS) and CDNR values from GSTR 2B. Does not include imports or ISD",
-                        wb.add_format({"italic": True, "font_color": "red", "align": "left"}))
+                        wb.add_format({"italic": True, "font_color": "red", "align": "left", "font_name": "Aptos", "font_size": 10}))
 
         ws2.freeze_panes(data_start, 0)
         ws2.set_column(0, 0, 14)
@@ -2667,8 +2673,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         ws = writer.sheets["Reconciliation"]
         ws.freeze_panes(1, 0)
         ws.autofilter(0, 0, len(combined_df), max(0, combined_df.shape[1] - 1))
-        ws.set_row(0, None, header_fmt)
-        _format_and_autosize(ws, combined_df, num_fmt)
+        # Overwrite header
+        _apply_header_style(ws, combined_df, header_fmt)
+        _format_and_autosize(ws, combined_df, num_fmt, text_fmt)
         _highlight_columns(ws, combined_df, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
 
         # ==========================================
@@ -2680,14 +2687,13 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         ws3 = writer.sheets["PR - Comments"]
         ws3.freeze_panes(1, 0)
         ws3.autofilter(0, 0, len(pr_comments), max(0, pr_comments.shape[1] - 1))
-        ws3.set_row(0, None, header_fmt)
-        _format_and_autosize(ws3, pr_comments, num_fmt)
+        _apply_header_style(ws3, pr_comments, header_fmt)
+        _format_and_autosize(ws3, pr_comments, num_fmt, text_fmt)
         _highlight_columns(ws3, pr_comments, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
 
         # B2B Comments
         try:
             if 'df_b2b_raw' in locals() and df_b2b_raw is not None and not df_b2b_raw.empty:
-                # Use the EXPORT version that has types fixed
                 to_write = gstr2b_comments.copy() if 'gstr2b_comments' in locals() else df_b2b_raw_export.copy()
 
                 for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR"]:
@@ -2705,12 +2711,12 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws4 = writer.sheets["GSTR 2B B2B - Comments"]
                 ws4.freeze_panes(1, 0)
                 ws4.autofilter(0, 0, len(to_write), max(0, to_write.shape[1] - 1))
-                ws4.set_row(0, None, header_fmt)
-                _format_and_autosize(ws4, to_write, num_fmt)
+                _apply_header_style(ws4, to_write, header_fmt)
+                _format_and_autosize(ws4, to_write, num_fmt, text_fmt)
                 _highlight_columns(ws4, to_write, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
             else:
                 pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]).to_excel(writer, index=False, sheet_name="GSTR 2B B2B - Comments")
-                writer.sheets["GSTR 2B B2B - Comments"].set_row(0, None, header_fmt)
+                _apply_header_style(writer.sheets["GSTR 2B B2B - Comments"], pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]), header_fmt)
         except Exception:
             app.logger.exception("Could not write B2B sheet to output workbook")
 
@@ -2734,12 +2740,12 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 ws5 = writer.sheets["GSTR 2B CDNR - Comments"]
                 ws5.freeze_panes(1, 0)
                 ws5.autofilter(0, 0, len(to_write_cd), max(0, to_write_cd.shape[1] - 1))
-                ws5.set_row(0, None, header_fmt)
-                _format_and_autosize(ws5, to_write_cd, num_fmt)
+                _apply_header_style(ws5, to_write_cd, header_fmt)
+                _format_and_autosize(ws5, to_write_cd, num_fmt, text_fmt)
                 _highlight_columns(ws5, to_write_cd, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
             else:
                 pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]).to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")
-                writer.sheets["GSTR 2B CDNR - Comments"].set_row(0, None, header_fmt)
+                _apply_header_style(writer.sheets["GSTR 2B CDNR - Comments"], pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]), header_fmt)
         except Exception:
             app.logger.exception("Could not write CDNR sheet to output workbook")
 

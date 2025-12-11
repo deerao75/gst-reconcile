@@ -13,7 +13,7 @@
     align-items: stretch;
     justify-content: center;
     flex-wrap: wrap;
-    max-width: 1080px; /* Increased max-width for 3 cards */
+    max-width: 1080px;
     width: 100%;
   }
   .plan {
@@ -21,7 +21,7 @@
     border-radius: 10px;
     box-shadow: 0 6px 18px rgba(0,0,0,0.08);
     padding: 28px;
-    width: 320px; /* Adjusted width */
+    width: 320px;
     text-align: center;
     display: flex;
     flex-direction: column;
@@ -45,10 +45,9 @@
   }
   .plan button:hover { background: #08563b; }
 
-  /* --- START: THIS IS THE FIX --- */
-  /* Style for the free trial button */
+  /* Free trial specific styles */
   .plan.free-trial button {
-      background-color: #3b82f6; /* A friendly blue */
+      background-color: #3b82f6;
   }
   .plan.free-trial button:hover {
       background-color: #2563eb;
@@ -56,7 +55,6 @@
   .plan.free-trial .price {
       color: #3b82f6;
   }
-  /* --- END: THIS IS THE FIX --- */
 
   @media (max-width: 1024px) {
     .plan { width: 45%; }
@@ -74,12 +72,12 @@
   <div style="width:100%;max-width:1080px;">
     <div class="subscribe-header">
       <h2>Choose Your Plan</h2>
-      <div class="subscribe-note">All prices are inclusive of taxes where applicable. Secure payments.</div>
+      <div class="subscribe-note">All prices are inclusive of taxes where applicable. Secure payments via Razorpay.</div>
     </div>
 
     <div class="subscription-plans" role="list">
 
-      <!-- START: THIS IS THE FIX - Free Trial Plan -->
+      <!-- Free Trial Plan -->
       <div class="plan free-trial" role="listitem" aria-label="Free Trial Plan">
         <h3>Free Trial</h3>
         <div class="price">FREE</div>
@@ -90,110 +88,39 @@
           <button type="submit">Start Free Trial</button>
         </form>
       </div>
-      <!-- END: THIS IS THE FIX -->
 
+      <!-- Half-Yearly Plan -->
       <div class="plan" role="listitem" aria-label="Half-Yearly Plan">
         <h3>Half-Yearly</h3>
         <div class="price">INR 1,000 / month</div>
         <div class="billing">Billed as INR 6,000 for 6 months</div>
         <p>Save and get uninterrupted access for 6 months.</p>
 
-        <form method="POST" action="{{ url_for('create_payment') }}">
+        <!-- UPDATED FORM FOR RAZORPAY -->
+        <!-- Note: We point to 'payments.create_order' -->
+        <form method="POST" action="{{ url_for('payments.create_order') }}">
           <input type="hidden" name="plan" value="half-yearly">
-          <input type="hidden" name="amount" value="12000">
-          <input type="hidden" name="description" value="6-month subscription">
+          <!-- We removed amount/description hidden fields for security.
+               The backend 'payments.py' determines amount based on plan name. -->
           <button type="submit">Subscribe</button>
         </form>
       </div>
 
+      <!-- Annual Plan -->
       <div class="plan" role="listitem" aria-label="Annual Plan">
         <h3>Annual</h3>
         <div class="price">INR 833 / month</div>
         <div class="billing">Billed as INR 10,000 for 1 year</div>
         <p>Best value — discounted monthly equivalent for a full year.</p>
 
-        <form method="POST" action="{{ url_for('create_payment') }}">
+        <!-- UPDATED FORM FOR RAZORPAY -->
+        <form method="POST" action="{{ url_for('payments.create_order') }}">
           <input type="hidden" name="plan" value="annual">
-          <input type="hidden" name="amount" value="20000">
-          <input type="hidden" name="description" value="1-year subscription">
           <button type="submit">Subscribe</button>
         </form>
       </div>
+
     </div>
   </div>
 </div>
-<!-- Add this code at the bottom of templates/subscribe.html -->
-
-{% if show_modal %}
-<div id="comingSoonModal" class="modal-overlay">
-    <div class="modal-box">
-        <h2>Coming Soon</h2>
-        <p>Online payments are currently being integrated.</p>
-        <p>Please contact support or check back later.</p>
-        <button onclick="closeModal()" class="close-btn">Close</button>
-    </div>
-</div>
-
-<style>
-    /* Darkens the background */
-    .modal-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-color: rgba(0, 0, 0, 0.7); /* Dark semi-transparent background */
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        z-index: 1000;
-    }
-
-    /* The Center Box */
-    .modal-box {
-        background-color: #fff;
-        padding: 30px;
-        border-radius: 8px;
-        width: 90%;
-        max-width: 400px;
-        text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-        border: 2px solid #333; /* High contrast border */
-    }
-
-    .modal-box h2 {
-        color: #d9534f; /* Reddish color for contrast */
-        margin-top: 0;
-    }
-
-    .modal-box p {
-        font-size: 16px;
-        color: #333;
-    }
-
-    /* Close Button */
-    .close-btn {
-        margin-top: 20px;
-        padding: 10px 20px;
-        background-color: #333;
-        color: #fff;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 14px;
-    }
-
-    .close-btn:hover {
-        background-color: #555;
-    }
-</style>
-
-<script>
-    function closeModal() {
-        document.getElementById('comingSoonModal').style.display = 'none';
-        // Optional: Remove the query param if you redirected,
-        // but since we used render_template, simple JS hiding works fine.
-    }
-</script>
-{% endif %}
 {% endblock %}

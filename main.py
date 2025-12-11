@@ -23,6 +23,9 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 import sqlalchemy as sa
 from sqlalchemy import inspect
 from datetime import date, timedelta
+from flask_mail import Mail, Message
+from itsdangerous import URLSafeTimedSerializer
+
 
 # -------------------- Flask & App Config --------------------
 app = Flask(__name__)
@@ -31,9 +34,17 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-for-local-use-only
 # File upload limit
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024  # 25 MB
 
-# main.py
+# Email Configuration (Update with your real details)
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = 'info@acertax.com'  # REPLACE THIS
+app.config['MAIL_PASSWORD'] = 'jfqz ajoy ehiv uixg'   # REPLACE THIS (App Password)
+app.config['MAIL_DEFAULT_SENDER'] = 'info@acertax.com' # REPLACE THIS
 
-# ... (keep other imports) ...
+mail = Mail(app)
+s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+# -------------------------
 
 # Database: Use persistent disk on Render, fallback to local file, or use PostgreSQL if specified
 database_url = os.environ.get("DATABASE_URL")
@@ -59,10 +70,7 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy(app)
 
-# User Model (for login/subscribe)
-# main.py
 
-# main.py (update User model)
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
@@ -3089,11 +3097,55 @@ def forgot_password():
     if request.method == 'POST':
         email = request.form['email']
         user = User.query.filter_by(email=email).first()
+
         if user:
-            flash('Password reset link would be sent (simulated).')
+            # Generate token valid for 1 hour (3600 seconds)
+            token = s.dumps(email, salt='email-confirm')
+
+            # Create link
+            link = url_for('reset_password', token=token, _external=True)
+
+            # Send Email
+            msg = Message('Password Reset Request', recipients=[email])
+            msg.body = f'Click the link to reset your password: {link}\n\nLink expires in 1 hour.'
+
+            try:
+                mail.send(msg)
+                flash('An email has been sent with instructions to reset your password.', 'success')
+            except Exception as e:
+                flash(f'Error sending email: {str(e)}', 'danger')
         else:
-            flash('Email not found.')
+            # Security: Don't reveal if email exists or not, but for now we say sent
+            flash('If an account exists with that email, a reset link has been sent.', 'info')
+
+        return redirect(url_for('login'))
+
     return render_template('forgot_password.html')
+
+@app.route('/reset_password/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    try:
+        # Verify token (max age 3600 seconds = 1 hour)
+        email = s.loads(token, salt='email-confirm', max_age=3600)
+    except Exception:
+        flash('The reset link is invalid or has expired.', 'danger')
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        new_password = request.form['password']
+        user = User.query.filter_by(email=email).first()
+
+        if user:
+            user.password_hash = generate_password_hash(new_password)
+            db.session.commit()
+            flash('Your password has been updated! You can now log in.', 'success')
+            return redirect(url_for('login'))
+        else:
+            flash('User account not found.', 'danger')
+            return redirect(url_for('login'))
+
+    return render_template('reset_password.html', token=token)
+
 
 @app.route('/logout')
 def logout():
@@ -3120,33 +3172,6 @@ def subscribe():
     return render_template('subscribe.html')
 
 from typing import Any, Dict, Optional
-def verify_payu_response(posted: dict) -> bool:
-    """
-    Verify PayU response (compare posted 'hash' or 'sha2' with computed value).
-    Response hash formula:
-      sha512(salt|status|udf10|udf9|...|udf1|email|firstname|productinfo|amount|txnid|key)
-    """
-    posted_hash = (posted.get("hash") or posted.get("sha2") or "").strip().lower()
-    status = str(posted.get("status", "")).strip()
-    txnid = str(posted.get("txnid", "")).strip()
-    amount = str(posted.get("amount", "")).strip()
-    productinfo = str(posted.get("productinfo", "")).strip()
-    firstname = str(posted.get("firstname", "")).strip()
-    email = str(posted.get("email", "")).strip()
-    key = str(posted.get("key", os.environ.get("PAYU_MERCHANT_KEY", "") or "")).strip()
-    salt = os.environ.get("PAYU_SALT", "").strip()
-
-    # collect udf10..udf1 from posted (use empty strings if not present)
-    udf_list = []
-    for i in range(10, 0, -1):
-        udf_list.append(str(posted.get(f"udf{i}", "") or "").strip())
-
-    parts = [salt, status] + udf_list + [email, firstname, productinfo, amount, txnid, key]
-    hash_seq = "|".join(parts)
-    calc_hash = hashlib.sha512(hash_seq.encode("utf-8")).hexdigest().lower()
-    return calc_hash == posted_hash
-
-# Insert/replace the following helper and the `create_payment` route in main.py
 
 import hashlib
 import os
@@ -3155,93 +3180,6 @@ import html
 import time
 import secrets
 import re
-
-# ... (keep your other imports and Flask app setup) ...
-
-def payu_request_hash(params: dict) -> str:
-    """
-    Computes the PayU request hash using the exact formula:
-    sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
-    This means exactly 5 empty placeholders after udf5.
-    """
-    payu_salt = os.environ.get("PAYU_SALT", "").strip()
-
-    # The order of fields is absolutely critical.
-    hash_parts = [
-        str(params.get("key", "")),
-        str(params.get("txnid", "")),
-        str(params.get("amount", "")),
-        str(params.get("productinfo", "")),
-        str(params.get("firstname", "")),
-        str(params.get("email", "")),
-        str(params.get("udf1", "")),
-        str(params.get("udf2", "")),
-        str(params.get("udf3", "")),
-        str(params.get("udf4", "")),
-        str(params.get("udf5", "")),
-        "",  # Placeholder 1
-        "",  # Placeholder 2
-        "",  # Placeholder 3
-        "",  # Placeholder 4
-        "",  # Placeholder 5
-    ]
-
-    hash_sequence_str = "|".join(hash_parts) + "|" + payu_salt
-
-    # Compute and return the lowercase hex digest.
-    calculated_hash = hashlib.sha512(hash_sequence_str.encode('utf-8')).hexdigest().lower()
-    return calculated_hash
-
-@app.route("/create_payment", methods=["POST"])
-def create_payment():
-    """
-    Temporary Fix: Instead of connecting to PayU, this route
-    re-renders the subscribe page with a flag to show a 'Coming Soon' modal.
-    """
-    # We pass 'show_modal=True' to the template so it knows to display the popup
-    return render_template("subscribe.html", show_modal=True)
-
-from flask import Flask, render_template, render_template_string, request, send_file, flash, redirect, url_for, session, jsonify
-
-
-# REPLACEMENT FUNCTION: Updates user subscription upon successful payment.
-@app.route("/payment_success", methods=["POST", "GET"])
-def payment_success():
-    posted = request.form.to_dict() if request.form else request.args.to_dict()
-    ok = verify_payu_response(posted)
-    if not ok:
-        app.logger.warning("PayU verification failed for payload: %s", {k: posted.get(k) for k in posted.keys() if k != 'hash' and k != 'sha2'})
-        return render_template("payment_failed.html", reason="Hash verification failed", data=posted), 400
-
-    # --- Start Subscription Update Logic ---
-    email = posted.get('email')
-    plan = posted.get('udf1') # We stored the plan name in udf1
-    user = User.query.filter_by(email=email).first()
-
-    if user:
-        user.subscribed = True
-        today = date.today()
-
-        # Extend from today or from the future expiry date if they are re-subscribing early
-        start_date = max(today, user.subscription_expiry_date) if user.subscription_expiry_date else today
-
-        if plan == 'annual':
-            user.subscription_expiry_date = start_date + timedelta(days=365)
-        elif plan == 'half-yearly':
-            user.subscription_expiry_date = start_date + timedelta(days=182) # Approx 6 months
-
-        db.session.commit()
-        flash('Your subscription has been activated successfully!', 'success')
-    # --- End Subscription Update Logic ---
-
-    return render_template("payment_success.html", data=posted)
-# --- END: THIS IS THE FIX ---
-
-@app.route("/payment_fail", methods=["POST", "GET"])
-def payment_fail():
-    data = request.form.to_dict() or request.args.to_dict()
-    # TODO: log failure and show next steps to user
-    return render_template("payment_failed.html", data=data)
 
 
 from functools import wraps
@@ -3408,6 +3346,10 @@ def edit_user(user_id):
 def delete_user(user_id):
     # Delegate to the existing admin_delete_user implementation
     return admin_delete_user(user_id)
+
+# --- Register Razorpay Blueprint ---
+from payments import payment_bp
+app. register_blueprint(payment_bp)
 
 if __name__ == "__main__":
     app.run(debug=True)

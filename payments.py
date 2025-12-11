@@ -28,9 +28,9 @@ def create_order():
     plan = request.form.get('plan')
     amount = 0
     if plan == 'half-yearly':
-        amount = 59000
+        amount = 600000
     elif plan == 'annual':
-        amount = 99900
+        amount = 1000000
     else:
         flash("Invalid plan selected", "danger")
         return redirect(url_for('subscribe'))

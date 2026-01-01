@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .history-card {
+        background: #fff;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        padding: 24px;
+        margin-top: 30px;
+        border: 1px solid #eee;
+    }
+    . top-actions {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 15px;
+        border-bottom:  2px solid #f8f9fa;
+    }
+    .btn-action {
+        text-decoration: none;
+        padding: 10px 18px;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 0.9rem;
+        display: inline-block;
+    }
+    .btn-primary { background: #ffad33; color: #000; }
+    .btn-secondary { background: #e9ecef; color: #333; margin-right: 10px; }
+
+    table { width: 100%; border-collapse: collapse; }
+    th { background: #FCE4D6; padding: 12px; text-align: left; font-weight: bold; border-bottom: 2px solid #ddd; }
+    td { padding: 14px 12px; border-bottom: 1px solid #f1f1f1; vertical-align: middle; }
+    tr:hover { background: #fafafa; }
+</style>
+
+<div class="history-card">
+    <div class="top-actions">
+        <h2 style="margin: 0;">My Reconciliation History</h2>
+        <div>
+            {% if session.get('last_job_id') %}
+            <a href="{{ url_for('render_progress', job_id=session.get('last_job_id')) }}" class="btn-action btn-secondary">
+                ← View Last Result
+            </a>
+            {% endif %}
+            <a href="{{ url_for('index') }}" class="btn-action btn-primary">+ Start New</a>
+        </div>
+    </div>
+
+    {% if reports %}
+    <div style="overflow-x: auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:  5%;">#</th>
+                    <th style="width: 45%;">Report Name</th>
+                    <th style="width: 30%;">Date & Time</th>
+                    <th style="text-align: center; width: 20%;">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for report in reports %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td style="font-weight:600;">{{ report. report_name }}</td>
+                    <td style="color:#555;">{{ report.generated_at }}</td>
+                    <td style="text-align:center">
+                        <a href="{{ url_for('download_history', report_id=report.drive_file_id) }}"
+                           style="background:#212529; color:#fff; padding:8px 16px; border-radius: 4px; text-decoration:none; font-size:0.85rem; font-weight:600;">
+                           Download
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div style="text-align:center; padding:  60px 20px; background: #fafafa; border-radius: 8px;">
+        <h3 style="color:#aaa; margin-bottom: 10px;">No history found</h3>
+        <p style="color:#666; max-width:  400px; margin:  0 auto 20px auto;">
+            Run a reconciliation to see your history here.
+        </p>
+        <a href="{{ url_for('index') }}" class="btn-action btn-primary">Start Your First Reconciliation</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

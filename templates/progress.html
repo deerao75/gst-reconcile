@@ -1,140 +1,260 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Reconciliation progress</title>
-  <style>
-    :root {
-      --bg:#0f1115; --card:#161a22; --text:#e6e8ee; --muted:#9aa3b2;
-      --bar-bg:#2a3140; --bar:#4f8cff; --ok:#23c55e; --err:#ef4444;
+{% extends "base.html" %}
+
+{% block content %}
+<style>
+    .progress-wrapper {
+        width: max-content;       /* Auto-stretch to fit content */
+        min-width: 950px;         /* Minimum width */
+        margin: 40px auto;
+        background: #fff;
+        border-radius: 12px;
+        padding: 30px 40px;       /* Increased padding */
+        box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+        border: 2px solid #ddd;   /* Thicker border */
     }
-    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif;
-           background:var(--bg); color:var(--text); display:grid; place-items:center; min-height:100vh; }
-    .card { width:min(720px, 92vw); background:var(--card); border-radius:16px; padding:24px 24px 20px; box-shadow: 0 10px 30px rgb(0 0 0 / 35%); }
 
-    h1 { margin:0 0 6px; font-size:20px; font-weight:650; letter-spacing:.2px; }
-    p.sub { margin:0 0 16px; color:var(--muted); }
-
-    .status-row { display:flex; align-items:center; gap:12px; margin:10px 0 14px; }
-    .pill { font-size:12px; padding:4px 10px; border-radius:999px; background:#1e2633; color:#C5D1E5; }
-
-    /* Spinner */
-    .spin { width:18px; height:18px; border-radius:50%;
-            border:3px solid #2a3140; border-top-color:var(--bar); animation: spin 0.85s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    .msg { color:var(--muted); font-size:14px; }
-
-    /* Progress bar with animated stripes while active */
-    .bar { position:relative; height:12px; width:100%; background:var(--bar-bg); border-radius:999px; overflow:hidden; }
-    .bar > span { position:relative; display:block; height:100%; width:0%; background:var(--bar); transition:width .5s ease; }
-    .bar.active > span::after {
-      content:""; position:absolute; inset:0; background:linear-gradient(120deg, #ffffff33 25%, transparent 25%, transparent 50%, #ffffff33 50%, #ffffff33 75%, transparent 75%, transparent);
-      background-size: 24px 12px; animation: move 0.9s linear infinite;
-      border-radius:inherit;
+    /* Animated Loading Section */
+    .loading-container {
+        text-align: center;
+        padding: 40px 20px;
     }
-    @keyframes move { from { transform: translateX(0); } to { transform: translateX(24px); } }
 
-    .pct { font-variant-numeric: tabular-nums; font-weight:600; width:48px; text-align:right; }
-    .row { display:flex; align-items:center; gap:12px; }
+    .spinner-ring {
+        display: inline-block;
+        width: 60px;              /* Slightly larger */
+        height: 60px;
+        border: 6px solid #f3f3f3;
+        border-radius: 50%;
+        border-top: 6px solid #ffad33; /* Orange color */
+        animation: spin 1s linear infinite;
+        margin-bottom: 25px;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
-    .hidden { display:none; }
-    .footer { margin-top:14px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); font-size:13px; }
-    .btn-group { display:flex; gap:10px; }
-    a.btn { background:#1f2937; color:#e6e8ee; text-decoration:none; padding:8px 12px; border-radius:10px; transition: background-color 0.2s; }
-    a.btn:hover { background:#374151; }
-    a.btn-primary { background:#4f8cff; color:#ffffff; }
-    a.btn-primary:hover { background:#3b82f6; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <!-- Change these lines to whatever wording you prefer -->
-    <h1 id="title">Reconciliation started</h1>
-    <p class="sub" id="subtitle">We’re processing your files. This page updates automatically.</p>
+    .loading-title {
+        font-size: 1.8rem;
+        font-weight: bold;
+        color: #333;
+        margin-bottom: 15px;
+    }
 
-    <div class="status-row">
-      <div id="spinner" class="spin" aria-hidden="true"></div>
-      <span class="pill" id="statePill">started</span>
-      <span class="msg" id="liveMsg">Crunching rows in the background…</span>
+    .status-msg { font-size: 1.1rem; color: #555; margin-bottom: 5px; }
+    .pct-text { font-size: 2rem; font-weight: 800; color: #333; }
+
+    .progress-bar-bg {
+        height: 10px;
+        background: #eee;
+        border-radius: 5px;
+        overflow: hidden;
+        margin: 20px auto;
+        width: 600px; /* Fixed width for the bar so it looks good */
+        max-width: 90%;
+    }
+    .progress-bar-fill {
+        height: 100%;
+        background: #ffad33; /* Orange fill */
+        width: 0%;
+        transition: width 0.4s;
+    }
+
+    /* Dashboard Table Styles */
+    #dashboard-area { display: none; margin-top: 10px; }
+
+    .dash-header {
+        background-color: #FCE4D6;
+        color: #000;
+        font-weight: bold;
+        text-align: center;
+        padding: 10px;
+        border: 1px solid #ccc;
+    }
+    .dash-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+        margin-top: 15px;
+        white-space: nowrap;
+    }
+    .dash-table th, .dash-table td {
+        border: 1px solid #ccc;
+        padding: 10px 15px;
+        text-align: right;
+    }
+    .dash-table th.left-align { text-align: left; }
+    .dash-table tr.total-row { font-weight: bold; background-color: #f9f9f9; }
+
+    /* Row Count Cards */
+    .count-container {
+        display: flex;
+        gap: 20px;
+        justify-content: center;
+        margin-bottom: 25px;
+        flex-wrap: wrap;
+    }
+    .count-card {
+        background: #f8f9fa;
+        padding: 15px 25px;
+        border-radius: 8px;
+        border: 1px solid #ddd;
+        text-align: center;
+        min-width: 150px;
+    }
+    .count-val { display: block; font-size: 1.4rem; font-weight: bold; color: #000; }
+    .count-lbl { font-size: 0.85rem; color: #666; text-transform: uppercase; }
+
+    .btn-download {
+        display: inline-block;
+        background: #000;
+        color: #fff;
+        padding: 12px 30px;
+        border-radius: 6px;
+        text-decoration: none;
+        font-weight: bold;
+        margin-top: 20px;
+    }
+    .btn-download:hover { background: #333; }
+</style>
+
+<div style="text-align: center;"> <!-- Centering Wrapper -->
+    <div class="progress-wrapper" style="text-align: left;">
+
+        <!-- Loading State -->
+        <div id="loading-state" class="loading-container">
+            <h2 class="loading-title">Reconciliation in Progress</h2>
+            <div class="spinner-ring"></div>
+
+            <div id="status-text" class="status-msg">Initializing...</div>
+
+            <div class="progress-bar-bg">
+                <div id="bar-fill" class="progress-bar-fill"></div>
+            </div>
+
+            <div id="pct-display" class="pct-text">0%</div>
+            <p style="color:#888; font-size: 0.9rem; margin-top: 10px;">Please keep this tab open.</p>
+        </div>
+
+        <!-- Results State -->
+        <div id="dashboard-area">
+            <h2 style="text-align:center; margin-bottom:20px;">Reconciliation Complete</h2>
+
+            <div class="count-container">
+                <div class="count-card">
+                    <span class="count-val" id="cnt-pr">0</span>
+                    <span class="count-lbl">Rows in PR</span>
+                </div>
+                <div class="count-card">
+                    <span class="count-val" id="cnt-b2b">0</span>
+                    <span class="count-lbl">Rows in 2B (B2B)</span>
+                </div>
+                <div class="count-card">
+                    <span class="count-val" id="cnt-cdnr">0</span>
+                    <span class="count-lbl">Rows in 2B (CDNR)</span>
+                </div>
+            </div>
+
+            <div style="overflow-x:auto;">
+                <table class="dash-table">
+                    <thead>
+                        <tr>
+                            <th rowspan="2" class="left-align dash-header">Status</th>
+                            <th colspan="4" class="dash-header">PR Side</th>
+                            <th colspan="4" class="dash-header">GSTR 2B Side</th>
+                        </tr>
+                        <tr style="background:#fff;">
+                            <th>CGST</th><th>SGST</th><th>IGST</th><th>Total</th>
+                            <th>CGST</th><th>SGST</th><th>IGST</th><th>Total</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dash-body">
+                        <!-- Javascript will populate rows here -->
+                    </tbody>
+                </table>
+            </div>
+
+            <div style="text-align:center;">
+                <a href="#" id="dl-btn" class="btn-download">Download Excel Report</a>
+                <br><br>
+                <a href="{{ url_for('history') }}" style="color:#666; text-decoration:underline;">Go to History</a>
+            </div>
+        </div>
     </div>
+</div>
 
-    <div class="row" style="margin-bottom:8px;">
-      <div id="bar" class="bar active"><span id="barFill"></span></div>
-      <div class="pct" id="pctText">0%</div>
-    </div>
+<script>
+    const jobId = "{{ job_id }}";
+    const loader = document.getElementById('loading-state');
+    const dashboard = document.getElementById('dashboard-area');
+    const bar = document.getElementById('bar-fill');
+    const pct = document.getElementById('pct-display');
+    const msg = document.getElementById('status-text');
+    const tbody = document.getElementById('dash-body');
+    const dlBtn = document.getElementById('dl-btn');
 
-    <div class="footer">
-      <span id="hint">Please keep this tab open.</span>
-      <div class="btn-group">
-        <a id="homeBtn" class="btn hidden" href="/">Start New</a>
-        <a id="downloadBtn" class="btn btn-primary hidden" href="#">Download result</a>
-      </div>
-    </div>
-  </div>
+    // Number Formatter (Indian Currency)
+    const fmt = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-  <script>
-    (function () {
-      const jobId = "{{ job_id }}";
-      const bar = document.getElementById("bar");
-      const pctText = document.getElementById("pctText");
-      const barFill = document.getElementById("barFill");
-      const statePill = document.getElementById("statePill");
-      const liveMsg  = document.getElementById("liveMsg");
-      const dlBtn    = document.getElementById("downloadBtn");
-      const homeBtn = document.getElementById("homeBtn");
-      const hint     = document.getElementById("hint");
-      const spinner  = document.getElementById("spinner");
+    async function poll() {
+        try {
+            const r = await fetch(`/status/${jobId}`);
+            if(!r.ok) throw new Error("Net err");
+            const d = await r.json();
+            const p = d.progress || {pct:0, msg:"Connecting..."};
 
-      let lastPct = 0;
-      function update(pct, msg, state){
-        pct = Math.max(0, Math.min(100, parseInt(pct || 0, 10)));
-        if (pct !== lastPct) {
-          pctText.textContent = pct + "%";
-          barFill.style.width = pct + "%";
-          lastPct = pct;
+            bar.style.width = p.pct + "%";
+            pct.innerText = p.pct + "%";
+            msg.innerText = p.msg;
+
+            if (d.state === "finished") {
+                if(d.result && d.result.dashboard_stats) {
+                    renderDashboard(d.result.dashboard_stats);
+                }
+                dlBtn.href = `/download/${jobId}`;
+                loader.style.display = 'none';
+                dashboard.style.display = 'block';
+                return;
+            }
+
+            if (d.state === "failed") {
+                msg.innerText = "Failed. Please try again.";
+                msg.style.color = "red";
+                document.querySelector('.spinner-ring').style.borderColor = "red";
+                return;
+            }
+
+            setTimeout(poll, 1000);
+        } catch(e) { console.error(e); setTimeout(poll, 2000); }
+    }
+
+    function renderDashboard(data) {
+        // 1. Update Counts
+        if(data.counts) {
+            document.getElementById('cnt-pr').innerText = data.counts.pr || 0;
+            document.getElementById('cnt-b2b').innerText = data.counts.b2b || 0;
+            document.getElementById('cnt-cdnr').innerText = data.counts.cdnr || 0;
         }
-        if (msg)   liveMsg.textContent = msg;
-        if (state) statePill.textContent = state;
-      }
 
-      async function tick(){
-        try{
-          const r = await fetch(`/status/${jobId}`, { cache: "no-store" });
-          if(!r.ok) throw new Error("status " + r.status);
-          const j = await r.json();
-          const state = j.state || "queued";
-          const prog  = j.progress || {};
-          update(prog.pct, prog.msg, state);
+        // 2. Build Table
+        if(!data.table) return;
+        let html = "";
+        data.table.forEach(row => {
+            const isTotal = row.status === "Total";
+            const style = isTotal ? 'class="total-row"' : '';
 
-          if (state === "finished"){
-            spinner.classList.add("hidden");
-            bar.classList.remove("active");
-            statePill.textContent = "finished";
-            hint.textContent = "Your file is ready.";
-            homeBtn.classList.remove("hidden");
-            dlBtn.classList.remove("hidden");
-            dlBtn.href = `/download/${jobId}`;
-            // optional auto-download:
-            window.location.href = `/download/${jobId}`;
-            return;
-          }
-          if (state === "failed"){
-            spinner.classList.add("hidden");
-            bar.classList.remove("active");
-            statePill.textContent = "failed";
-            statePill.style.background = "#ef4444";
-            hint.textContent = "The job failed. Please try again.";
-            homeBtn.classList.remove("hidden");
-            console.error(j.error || "Job failed");
-            return;
-          }
-        }catch(e){ console.error(e); }
-        setTimeout(tick, 1200);
-      }
-      tick();
-    })();
-  </script>
-</body>
-</html>
+            html += `<tr ${style}>
+                <td class="left-align"><strong>${row.status || 'Total'}</strong></td>
+                <td>${fmt.format(row.pr.cgst)}</td>
+                <td>${fmt.format(row.pr.sgst)}</td>
+                <td>${fmt.format(row.pr.igst)}</td>
+                <td><strong>${fmt.format(row.pr.total)}</strong></td>
+                <td>${fmt.format(row.b2b.cgst)}</td>
+                <td>${fmt.format(row.b2b.sgst)}</td>
+                <td>${fmt.format(row.b2b.igst)}</td>
+                <td><strong>${fmt.format(row.b2b.total)}</strong></td>
+            </tr>`;
+        });
+        tbody.innerHTML = html;
+    }
+
+    poll();
+</script>
+{% endblock %}

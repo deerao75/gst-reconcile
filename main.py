@@ -3,13 +3,11 @@ import re
 import os
 from dotenv import load_dotenv
 load_dotenv(override=False)  # ensures both Flask and RQ worker see .env
-
 import math
-import tempfile
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple
 from collections import defaultdict
-from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session, jsonify
+from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session, jsonify, after_this_request
 import pandas as pd
 import secrets
 # ------- NEW: Queue & Google Drive imports -------
@@ -46,21 +44,23 @@ mail = Mail(app)
 s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 # -------------------------
 
-# Database: Use persistent disk on Render, fallback to local file, or use PostgreSQL if specified
+# Database Configuration
 database_url = os.environ.get("DATABASE_URL")
+database_path = os.environ. get("DATABASE_PATH")
 
 if database_url:
-    # If DATABASE_URL is set (e.g., for PostgreSQL), use it.
+    # PostgreSQL (e. g., on cloud platforms)
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url.replace("postgres://", "postgresql://")
+elif database_path:
+    # Docker environment with shared volume
+    os. makedirs(os.path. dirname(database_path), exist_ok=True)
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{database_path}"
 else:
-    # If no DATABASE_URL, use SQLite with logic for Render's persistent disk.
-    # Check if we are in the Render environment by looking for the disk mount path.
+    # Local development or e2enetworks (no Docker)
     render_disk_path = "/mnt/data"
-    if os.path.exists(render_disk_path):
-        # We are on Render: use the persistent disk for the database.
-        db_path = os.path.join(render_disk_path, "users.db")
+    if os.path. exists(render_disk_path):
+        db_path = os. path.join(render_disk_path, "users.db")
     else:
-        # We are running locally: use a regular file in the project folder.
         db_path = "users.db"
     app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
 
@@ -70,6 +70,9 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy(app)
 
+# Ensure all tables exist on startup
+with app.app_context():
+    db.create_all()
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -85,6 +88,29 @@ class User(db.Model):
 import threading
 _tables_created = False
 _tables_lock = threading.Lock()
+
+class ReconciliationReport(db. Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db. Integer, db.ForeignKey('user.id'), nullable=False)
+
+    # Metadata
+    report_name = db. Column(db.String(200))
+    generated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Summary Stats
+    total_matched_value = db.Column(db.Float, default=0.0)
+    total_mismatched_value = db.Column(db.Float, default=0.0)
+    row_count = db.Column(db.Integer, default=0)
+
+    # Link to file
+    drive_file_id = db.Column(db.String(100), nullable=False)
+    status = db.Column(db.String(20), default="completed")
+
+    user = db.relationship('User', backref=db.backref('reports', lazy=True))
+
+# --- DB Helper Update ---
+# Find your 'ensure_user_schema' function or 'create_tables_once'.
+# Ensure db.create_all() is called to generate this new table.
 
 @app.before_request
 def clear_stale_session_if_user_missing():
@@ -2765,7 +2791,7 @@ from rq import get_current_job
 import tempfile, os, time
 from concurrent.futures import ThreadPoolExecutor
 
-def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal", target_return_period: str = "") -> dict:
+def process_reconcile(drive_id_2b:  str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal", target_return_period: str = "") -> dict:
     def _mark(pct, msg):
         j = get_current_job()
         if j:
@@ -2774,12 +2800,13 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
         print(f"[{time.strftime('%H:%M:%S')}] {pct}% - {msg}", flush=True)
 
     t0 = time.time()
-    _mark(3, "Starting")
+    _mark(3, "Starting reconciliation...")
+
     with tempfile.TemporaryDirectory() as td:
         in2b = os.path.join(td, "gstr2b.xlsx")
         inpr = os.path.join(td, "purchase_register.xlsx")
 
-        _mark(5, "Downloading inputs from Drive")
+        _mark(10, "Downloading inputs from Cloud Storage...")
         def _dl(fid, path):
             download_from_drive(fid, path)
             return path
@@ -2787,38 +2814,179 @@ def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user
             fut2b = ex.submit(_dl, drive_id_2b, in2b)
             futpr = ex.submit(_dl, drive_id_pr, inpr)
             fut2b.result(); futpr.result()
-        _mark(22, f"Downloads finished in {time.time()-t0:.1f}s")
 
-        _mark(30, "Reconciling")
+        _mark(25, "Processing files...")
         x = selections
 
-        # --- START: THIS IS THE FIX ---
-        # Pass the gstr2b_format and target_return_period arguments down.
+        # --- Capture Row Counts ---
+        row_counts = {"pr": 0, "b2b": 0, "cdnr": 0}
+        try:
+            df_pr_check = pd.read_excel(inpr, engine="openpyxl")
+            row_counts["pr"] = len(df_pr_check)
+
+            with pd.ExcelFile(in2b) as xls:
+                offset = 6 if gstr2b_format == "portal" else 1
+                if "B2B" in xls.sheet_names:
+                    raw = pd.read_excel(xls, "B2B", header=None)
+                    row_counts["b2b"] = max(0, len(raw) - offset)
+                if "B2B-CDNR" in xls. sheet_names:
+                    raw = pd.read_excel(xls, "B2B-CDNR", header=None)
+                    row_counts["cdnr"] = max(0, len(raw) - offset)
+        except Exception as e:
+            print(f"Row Count Warning: {e}")
+
+        _mark(40, "Running matching algorithms...")
         blob = _run_reconciliation_pipeline(
             tmp2b_path=in2b, tmppr_path=inpr,
             gstr2b_format=gstr2b_format,
             target_return_period=target_return_period,
-            # B2B
-            inv_2b_b2b_sel=x.get("inv_2b_b2b",""), gst_2b_b2b_sel=x.get("gst_2b_b2b",""), date_2b_b2b_sel=x.get("date_2b_b2b",""), cgst_2b_b2b_sel=x.get("cgst_2b_b2b",""), sgst_2b_b2b_sel=x.get("sgst_2b_b2b",""), igst_2b_b2b_sel=x.get("igst_2b_b2b",""),
-            # CDNR
+            inv_2b_b2b_sel=x. get("inv_2b_b2b",""), gst_2b_b2b_sel=x.get("gst_2b_b2b",""), date_2b_b2b_sel=x.get("date_2b_b2b",""), cgst_2b_b2b_sel=x.get("cgst_2b_b2b",""), sgst_2b_b2b_sel=x. get("sgst_2b_b2b",""), igst_2b_b2b_sel=x.get("igst_2b_b2b",""),
             note_2b_cdnr_sel=x.get("note_2b_cdnr",""), gst_2b_cdnr_sel=x.get("gst_2b_cdnr",""), notedate_2b_cdnr_sel=x.get("notedate_2b_cdnr",""), cgst_2b_cdnr_sel=x.get("cgst_2b_cdnr",""), sgst_2b_cdnr_sel=x.get("sgst_2b_cdnr",""), igst_2b_cdnr_sel=x.get("igst_2b_cdnr",""),
-            # PR
-            inv_pr_sel=x.get("inv_pr",""), gst_pr_sel=x.get("gst_pr",""), date_pr_sel=x.get("date_pr",""), cgst_pr_sel=x.get("cgst_pr",""), sgst_pr_sel=x.get("sgst_pr",""), igst_pr_sel=x.get("igst_pr","")
+            inv_pr_sel=x.get("inv_pr",""), gst_pr_sel=x. get("gst_pr",""), date_pr_sel=x.get("date_pr",""), cgst_pr_sel=x.get("cgst_pr",""), sgst_pr_sel=x. get("sgst_pr",""), igst_pr_sel=x.get("igst_pr","")
         )
-        # --- END: THIS IS THE FIX ---
 
-        _mark(82, f"Reconcile+write took {time.time()-t0:.1f}s")
+        _mark(80, "Generating Excel report...")
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        _mark(85, "Uploading result to Drive")
-        out_path = os.path.join(td, f"{user_id}_gstr2b_pr_reconciliation.xlsx")
+        # New Naming Pattern: Recon_{email_part}_{timestamp}.xlsx
+        filename = f"Recon_{user_id}_{timestamp}.xlsx"
+        out_path = os.path.join(td, filename)
+
         with open(out_path, "wb") as f:
             f.write(blob)
-        result_id = upload_to_drive(out_path, os.path.basename(out_path))
-        _mark(100, f"Done in {time.time()-t0:.1f}s")
 
-    return {"result_drive_id": result_id}
+        # --- EXTRACT DASHBOARD TABLE DATA ---
+        dashboard_stats = {}
 
-# -------------------- QUEUED confirm route + status + download --------------------
+        try:
+            # 1. Find Header Row
+            df_raw = pd.read_excel(out_path, sheet_name="Reconciliation", engine="openpyxl", header=None, nrows=10)
+
+            header_idx = 0
+            for idx, row in df_raw.iterrows():
+                row_str = " ".join([str(val) for val in row if pd.notna(val)]).upper()
+                if "MAPPING" in row_str:
+                    header_idx = idx
+                    break
+
+            # 2. Re-read with correct header
+            df_recon = pd.read_excel(out_path, sheet_name="Reconciliation", engine="openpyxl", header=header_idx)
+
+            # 3. Normalize Columns (Uppercase)
+            df_recon. columns = [str(c).upper().strip() for c in df_recon.columns]
+
+            print(f"DEBUG: Reconciliation Columns: {list(df_recon.columns)}")
+
+            # 4. Find columns using keyword matching
+            def find_column(keywords):
+                """Find a column that contains ALL keywords"""
+                for col in df_recon.columns:
+                    if all(kw in col for kw in keywords):
+                        return col
+                return None
+
+            def find_column_any(keywords):
+                """Find a column that contains ANY of the keywords"""
+                for col in df_recon.columns:
+                    for kw in keywords:
+                        if kw in col:
+                            return col
+                return None
+
+            # PR Columns
+            col_pr_cgst = find_column(["CGST", "_PR"]) or find_column(["CGST", "AMT"])
+            col_pr_sgst = find_column(["SGST", "_PR"]) or find_column(["SGST", "AMT"])
+            col_pr_igst = find_column(["IGST", "_PR"]) or find_column(["IGST", "AMT"])
+
+            # 2B Columns
+            col_2b_cgst = find_column(["CENTRAL", "_2B"]) or find_column(["CGST", "_2B"])
+            col_2b_sgst = find_column(["STATE", "_2B"]) or find_column(["SGST", "_2B"])
+            col_2b_igst = find_column(["INTEGRATED", "_2B"]) or find_column(["IGST", "_2B"])
+
+            # Mapping column
+            col_mapping = find_column_any(["MAPPING"])
+
+            print(f"DEBUG: PR Cols:  CGST={col_pr_cgst}, SGST={col_pr_sgst}, IGST={col_pr_igst}")
+            print(f"DEBUG:  2B Cols: CGST={col_2b_cgst}, SGST={col_2b_sgst}, IGST={col_2b_igst}")
+            print(f"DEBUG: Mapping Col: {col_mapping}")
+
+            def _sum_col(df, status, col_name):
+                """Sum values in a column, optionally filtered by status"""
+                if not col_name or not col_mapping:
+                    return 0.0
+
+                try:
+                    if status:
+                        mask = df[col_mapping].astype(str).str.strip() == status
+                        filtered_df = df.loc[mask, col_name]
+                    else:
+                        filtered_df = df[col_name]  # All rows for Total
+
+                    # Convert to numeric properly - iterate to avoid string concatenation
+                    total = 0.0
+                    for val in filtered_df:
+                        if pd. isna(val):
+                            continue
+                        # Convert to string, remove commas, then to float
+                        val_str = str(val).replace(',', '').strip()
+                        if val_str and val_str.lower() != 'nan':
+                            try:
+                                total += float(val_str)
+                            except ValueError:
+                                continue
+                    return round(total, 2)
+                except Exception as e:
+                    print(f"DEBUG: _sum_col error for {col_name}: {e}")
+                    return 0.0
+
+            # 5. Build Rows
+            categories = ["Matched", "Almost Matched", "Not Matched", None]
+            table_rows = []
+
+            for cat in categories:
+                label = cat if cat else "Total"
+
+                pr_cgst = _sum_col(df_recon, cat, col_pr_cgst)
+                pr_sgst = _sum_col(df_recon, cat, col_pr_sgst)
+                pr_igst = _sum_col(df_recon, cat, col_pr_igst)
+                pr_tot = round(pr_cgst + pr_sgst + pr_igst, 2)
+
+                b2_cgst = _sum_col(df_recon, cat, col_2b_cgst)
+                b2_sgst = _sum_col(df_recon, cat, col_2b_sgst)
+                b2_igst = _sum_col(df_recon, cat, col_2b_igst)
+                b2_tot = round(b2_cgst + b2_sgst + b2_igst, 2)
+
+                table_rows.append({
+                    "status": label,
+                    "pr":  {"cgst": pr_cgst, "sgst": pr_sgst, "igst": pr_igst, "total": pr_tot},
+                    "b2b": {"cgst": b2_cgst, "sgst": b2_sgst, "igst": b2_igst, "total": b2_tot}
+                })
+
+                print(f"DEBUG: {label} - PR: {pr_cgst}+{pr_sgst}+{pr_igst}={pr_tot}, 2B: {b2_cgst}+{b2_sgst}+{b2_igst}={b2_tot}")
+
+            dashboard_stats["table"] = table_rows
+            dashboard_stats["counts"] = row_counts
+
+        except Exception as e:
+            print(f"Stats Extraction Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            dashboard_stats["table"] = []
+            dashboard_stats["counts"] = row_counts
+
+        _mark(90, "Saving to Cloud Storage...")
+        result_id = upload_to_drive(out_path, filename)
+
+        print(f"DEBUG: Result saved to Google Drive with ID: {result_id}")
+
+        _mark(100, "Done!")
+
+        return {
+            "result_drive_id": result_id,
+            "filename": filename,            # <--- ADD THIS
+            "dashboard_stats": dashboard_stats
+        }
+
 @app.route("/reconcile_confirm", methods=["POST"])
 def reconcile_confirm():
     tmp2b = session.get("tmp2b"); tmppr = session.get("tmppr")
@@ -2830,8 +2998,9 @@ def reconcile_confirm():
     try:
         from rq.job import Job
         from rq.registry import StartedJobRegistry, ScheduledJobRegistry, FailedJobRegistry
-        # Use the same queue object you already have (q)
-        user_identifier = session.get("email") or request.form.get("user_id", "anon")
+
+        # FIX: Get User Identifier correctly for cleanup
+        user_identifier = session.get("email") or "anon"
 
         # 1) If we stored a last_job_id in session, try remove it first
         old_job_id = session.get("last_job_id")
@@ -2840,87 +3009,17 @@ def reconcile_confirm():
                 old_job = Job.fetch(old_job_id, connection=rconn)
                 status = old_job.get_status()
                 if status not in ("finished", "failed", "stopped"):
-                    try:
-                        old_job.cancel()
-                    except Exception:
-                        pass
-                    try:
-                        old_job.delete()
-                    except Exception:
-                        pass
-            except Exception:
-                # ignore fetch/delete errors
-                pass
-            # forget it from session
+                    try: old_job.cancel(); old_job.delete()
+                    except: pass
+            except: pass
             session.pop("last_job_id", None)
 
-        # 2) Scan registries for any other jobs that belong to this user and delete them
-        try:
-            # queue job ids (queued)
-            queued_ids = list(q.job_ids) if hasattr(q, "job_ids") else []
-        except Exception:
-            queued_ids = []
-
-        try:
-            started_reg = StartedJobRegistry(queue=q, connection=rconn)
-            started_ids = started_reg.get_job_ids()
-        except Exception:
-            started_ids = []
-
-        try:
-            scheduled_reg = ScheduledJobRegistry(queue=q, connection=rconn)
-            scheduled_ids = scheduled_reg.get_job_ids()
-        except Exception:
-            scheduled_ids = []
-
-        try:
-            failed_reg = FailedJobRegistry(queue=q, connection=rconn)
-            failed_ids = failed_reg.get_job_ids()
-        except Exception:
-            failed_ids = []
-
-        candidate_ids = set(queued_ids) | set(started_ids) | set(scheduled_ids) | set(failed_ids)
-
-        for jid in candidate_ids:
-            try:
-                j = Job.fetch(jid, connection=rconn)
-            except Exception:
-                continue
-
-            # match either by explicit meta user_id or by the job args (process_reconcile's args include user_id)
-            meta_user = j.meta.get("user_id") if isinstance(j.meta, dict) else None
-            args_user = None
-            try:
-                # safe-check args length; user_id is passed as 4th arg in your enqueue call
-                if j.args and len(j.args) >= 4:
-                    args_user = j.args[3]
-            except Exception:
-                args_user = None
-
-            if (meta_user and str(meta_user) == str(user_identifier)) or (args_user and str(args_user) == str(user_identifier)):
-                try:
-                    st = j.get_status()
-                    if st not in ("finished", "failed", "stopped"):
-                        try:
-                            j.cancel()
-                        except Exception:
-                            pass
-                        try:
-                            j.delete()
-                        except Exception:
-                            pass
-                except Exception:
-                    # swallow per-job errors to avoid breaking upload flow
-                    pass
     except Exception:
-        # Be very defensive: if RQ is unavailable, don't block the user from continuing
-        pass
+        pass # Be defensive if RQ fails
     # -----------------------------------------------------------------
 
-    # Get the format choice from the session here, within the request context.
+    # Get the format choice and return period
     gstr2b_format = session.get("gstr2b_format", "portal")
-
-    # NEW: Capture the user-selected return period (e.g. '2025-09')
     target_return_period = request.form.get("return_period", "").strip()
 
     sel = {
@@ -2951,22 +3050,34 @@ def reconcile_confirm():
         drive_id_2b = upload_to_drive(tmp2b, "gstr2b.xlsx")
         drive_id_pr = upload_to_drive(tmppr, "purchase_register.xlsx")
     finally:
-        try:
-            os.remove(tmp2b); os.remove(tmppr)
-        except Exception:
-            pass
+        try: os.remove(tmp2b); os.remove(tmppr)
+        except: pass
         session.pop("tmp2b", None); session.pop("tmppr", None)
-        # --- START: THIS IS THE FIX ---
-        # Clean up the format from the session as well.
         session.pop("gstr2b_format", None)
-        # --- END: THIS IS THE FIX ---
 
-    user_id = request.form.get("user_id", "anon")
+    # --- CRITICAL FIX FOR HISTORY: Get User ID from Session ---
+    # The form does not contain user_id, so request.form.get("user_id") was returning "anon"
+    # This caused the history to be saved under "anon" instead of the actual ID.
+    # --- OLD CODE TO REMOVE: ---
+    # user_id = session.get("user_id")
+    # if not user_id:
+    #    user_id = "anon"
 
-    # Pass gstr2b_format and target_return_period as new arguments to the background job.
+    # --- NEW CODE: Use Email Identifier ---
+    user_email = session.get("email")
+    if user_email:
+        # clean email (john.doe@gmail.com -> john.doe)
+        user_identifier = re.sub(r'[^a-zA-Z0-9_\-\.]', '', user_email.split('@')[0])
+    else:
+        user_identifier = str(session.get("user_id", "anon"))
+
+    print(f"DEBUG: Starting Job for User: {user_identifier}")
+
+    # Enqueue Job (Pass user_identifier instead of user_id)
     job = q.enqueue(
         "main.process_reconcile",
-        drive_id_2b, drive_id_pr, sel, user_id, gstr2b_format, target_return_period,
+        drive_id_2b, drive_id_pr, sel, str(user_identifier),
+        gstr2b_format, target_return_period,
         job_timeout=-1,
         result_ttl=86400,
         failure_ttl=86400
@@ -2980,20 +3091,21 @@ def reconcile_confirm():
 
     return render_template("progress.html", job_id=job.id)
 
+# --- UPDATE STATUS ROUTE TO PASS RESULT ---
 @app.route("/status/<job_id>", methods=["GET"])
 def status(job_id):
     job = Job.fetch(job_id, connection=rconn)
     meta = job.meta.get("progress", {"pct": 0, "msg": "queued"})
     state = job.get_status()
     payload = {"state": state, "progress": meta}
+
     if state == "finished":
+        # Pass the full result (including stats) to frontend
         payload["result"] = job.result
     elif state == "failed":
         payload["error"] = (job.exc_info or "")[-1000:]
+
     return jsonify(payload)
-
-from flask import after_this_request
-
 @app.route("/download/<job_id>", methods=["GET"])
 def download(job_id):
     job = Job.fetch(job_id, connection=rconn)
@@ -3001,6 +3113,8 @@ def download(job_id):
         return jsonify({"error": "Job not finished"}), 409
 
     drive_id = job.result.get("result_drive_id")
+    # Get the correct filename from the job result
+    result_filename = job.result.get("filename", "reconciliation_report.xlsx")
     if not drive_id:
         return jsonify({"error": "No result id"}), 404
 
@@ -3027,7 +3141,7 @@ def download(job_id):
         path,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
-        download_name="gstr2b_pr_reconciliation.xlsx",
+        download_name=result_filename,
         conditional=True
     )
 
@@ -3040,15 +3154,21 @@ def login():
         email = request.form['email']
         password = request.form['password']
         user = User.query.filter_by(email=email).first()
+
+        # Verify user and password
         if user and check_password_hash(user.password_hash, password):
+            # Create Session Data
             session['logged_in'] = True
             session['email'] = email
-            # NEW: store user id in session so admin checks can rely on it
+
+            # CRITICAL: This ID is used by the History/My Files feature
             session['user_id'] = user.id
+
             flash('Logged in successfully.')
             return redirect(url_for('index'))
         else:
             flash('Invalid email or password.')
+
     return render_template('login.html')
 
 # @app.route('/register', methods=['GET', 'POST'])
@@ -3346,6 +3466,136 @@ def edit_user(user_id):
 def delete_user(user_id):
     # Delegate to the existing admin_delete_user implementation
     return admin_delete_user(user_id)
+
+@app.route('/history')
+def history():
+    """Displays the list of past reconciliations from Google Drive."""
+    if not session.get('logged_in'):
+        flash('Please log in to view history.', 'warning')
+        return redirect(url_for('login'))
+
+    # 1. Determine Identifier (Same logic as reconcile_confirm)
+    user_email = session.get("email")
+    if user_email:
+        user_identifier = re.sub(r'[^a-zA-Z0-9_\-\.]', '', user_email.split('@')[0])
+    else:
+        user_identifier = str(session.get("user_id", "anon"))
+
+    reports = []
+    print(f"DEBUG History: Fetching for: {user_identifier}")
+
+    try:
+        from googleapiclient.discovery import build
+        creds = get_credentials()
+        service = build('drive', 'v3', credentials=creds)
+
+        # 2. Search for files matching: Recon_{identifier}_
+        query = f"name contains 'Recon_{user_identifier}_' and trashed=false"
+        print(f"DEBUG History: Query = {query}")
+
+        # 3. CRITICAL FIX: Add supportsAllDrives to find files in all locations
+        results = service.files().list(
+            q=query,
+            fields="files(id, name, createdTime)",
+            orderBy="createdTime desc",
+            pageSize=50,
+            supportsAllDrives=True,         # <--- Fixes "Found 0 files"
+            includeItemsFromAllDrives=True  # <--- Fixes "Found 0 files"
+        ).execute()
+
+        files = results.get('files', [])
+        print(f"DEBUG History: Found {len(files)} files")
+
+        for f in files:
+            created_time = f.get('createdTime', '')
+            if created_time:
+                from dateutil import parser
+                dt = parser.parse(created_time)
+                formatted_date = dt.strftime('%d-%b-%Y %H:%M')
+            else:
+                formatted_date = 'N/A'
+
+            reports.append({
+                'id': f['id'],
+                'drive_file_id': f['id'],
+                'report_name': f['name'].replace('.xlsx', ''),
+                'generated_at': formatted_date,
+            })
+
+    except Exception as e:
+        print(f"DEBUG History ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+
+    return render_template('history.html', reports=reports)
+
+@app.route('/download_history/<report_id>')
+def download_history(report_id):
+    """Download a report file from Google Drive."""
+    if not session.get('logged_in'):
+        flash('Please log in to download files.', 'warning')
+        return redirect(url_for('login'))
+
+    # Create a temporary file path
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(fd)
+
+    try:
+        from googleapiclient.discovery import build
+        creds = get_credentials()
+        service = build('drive', 'v3', credentials=creds)
+
+        # 1. Get file metadata (for the name)
+        try:
+            file_metadata = service.files().get(
+                fileId=report_id,
+                fields='name',
+                supportsAllDrives=True  # Important: Add this flag
+            ).execute()
+            file_name = file_metadata.get('name', 'reconciliation_report.xlsx')
+        except Exception:
+            file_name = 'reconciliation_report.xlsx'
+
+        # 2. Download to the temp path using your existing helper
+        download_from_drive(report_id, path)
+
+        # 3. Cleanup after sending
+        @after_this_request
+        def _cleanup(response):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            return response
+
+        return send_file(
+            path,
+            as_attachment=True,
+            download_name=file_name,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+    except Exception as e:
+        print(f"History Download Error: {e}")
+        # Clean up if download failed
+        if os.path.exists(path):
+            try: os.remove(path)
+            except: pass
+
+        flash('Failed to download file from history. Please try again.', 'error')
+        return redirect(url_for('history'))
+
+
+
+# --- NEW ROUTE FOR HISTORY NAVIGATION ---
+@app.route("/progress/<job_id>")
+def render_progress(job_id):
+    """
+    Renders the progress page for a specific job ID.
+    Used by the History page to view past results.
+    """
+    return render_template("progress.html", job_id=job_id)
 
 # --- Register Razorpay Blueprint ---
 from payments import payment_bp

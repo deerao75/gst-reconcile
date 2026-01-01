@@ -303,9 +303,14 @@
       </div>
       <div class="title">Acer GST ↔ PR vs. 2B Reconciliation</div>
     </div>
+
+    <!-- In base.html, look for the .nav-menu div -->
     <div class="nav-menu">
       <a href="{{ url_for('index') }}">Home</a>
+
+      <!-- NEW: Add History Link for Logged In Users -->
       {% if session.logged_in %}
+        <a href="{{ url_for('history') }}">History</a>
         <a href="{{ url_for('logout') }}" class="btn btn-secondary">Logout</a>
         <a href="{{ url_for('subscribe') }}">Subscribe</a>
       {% else %}

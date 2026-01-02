@@ -172,7 +172,10 @@
             </div>
 
             <div style="text-align:center;">
-                <a href="#" id="dl-btn" class="btn-download">Download Excel Report</a>
+                <div style="display: flex; gap: 15px; justify-content: center;">
+                    <a href="#" id="dl-btn" class="btn-download">Download Full Report</a>
+                    <a href="#" id="dl-btn-nm" class="btn-download" style="background: #ff4d4f;">Download "Not Matched" Only</a>
+                </div>
                 <br><br>
                 <a href="{{ url_for('history') }}" style="color:#666; text-decoration:underline;">Go to History</a>
             </div>
@@ -208,7 +211,11 @@
                 if(d.result && d.result.dashboard_stats) {
                     renderDashboard(d.result.dashboard_stats);
                 }
+
+                // Set links for both buttons
                 dlBtn.href = `/download/${jobId}`;
+                document.getElementById('dl-btn-nm').href = `/download_nm/${jobId}`;
+
                 loader.style.display = 'none';
                 dashboard.style.display = 'block';
                 return;

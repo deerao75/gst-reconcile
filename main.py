@@ -2855,6 +2855,34 @@ def process_reconcile(drive_id_2b:  str, drive_id_pr: str, selections: dict, use
         with open(out_path, "wb") as f:
             f.write(blob)
 
+        # --- NEW: Generate "Not Matched" Only Report ---
+        filename_nm = f"NotMatched_{user_id}_{timestamp}.xlsx"
+        out_path_nm = os.path.join(td, filename_nm)
+
+        try:
+            # 1. Read the main report back to filter it
+            # (We read the 'Reconciliation' sheet where the main data is)
+            df_full = pd.read_excel(out_path, sheet_name="Reconciliation", engine="openpyxl")
+
+            # 2. Filter for "Not Matched" in the Mapping column
+            # Column names might be upper or title case, so we normalize
+            col_map = next((c for c in df_full.columns if str(c).lower() == "mapping"), None)
+
+            if col_map:
+                df_nm = df_full[df_full[col_map] == "Not Matched"]
+            else:
+                df_nm = pd.DataFrame() # Fallback
+
+            # 3. Save to new Excel file
+            df_nm.to_excel(out_path_nm, index=False, sheet_name="Not Matched Rows")
+
+            # 4. Upload to Drive
+            drive_id_nm = upload_to_drive(out_path_nm, filename_nm)
+
+        except Exception as e:
+            print(f"Error creating Not Matched report: {e}")
+            drive_id_nm = None
+
         # --- EXTRACT DASHBOARD TABLE DATA ---
         dashboard_stats = {}
 
@@ -2981,9 +3009,12 @@ def process_reconcile(drive_id_2b:  str, drive_id_pr: str, selections: dict, use
 
         _mark(100, "Done!")
 
+        # CRITICAL: Return both IDs
         return {
             "result_drive_id": result_id,
-            "filename": filename,            # <--- ADD THIS
+            "filename": filename,
+            "nm_drive_id": drive_id_nm,     # <--- Add this
+            "nm_filename": filename_nm,     # <--- Add this
             "dashboard_stats": dashboard_stats
         }
 
@@ -3586,6 +3617,41 @@ def download_history(report_id):
         flash('Failed to download file from history. Please try again.', 'error')
         return redirect(url_for('history'))
 
+
+@app.route("/download_nm/<job_id>", methods=["GET"])
+def download_nm(job_id):
+    job = Job.fetch(job_id, connection=rconn)
+    if job.get_status() != "finished":
+        return jsonify({"error": "Job not finished"}), 409
+
+    # Get the ID for the Not Matched file
+    drive_id = job.result.get("nm_drive_id")
+    filename = job.result.get("nm_filename", "not_matched.xlsx")
+
+    if not drive_id:
+        return "Report not generated or empty", 404
+
+    # Create temp path
+    fd, path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(fd)
+
+    try:
+        download_from_drive(drive_id, path)
+
+        @after_this_request
+        def _cleanup(response):
+            try: os.remove(path)
+            except: pass
+            return response
+
+        return send_file(
+            path,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception:
+        return "Error downloading file", 500
 
 
 # --- NEW ROUTE FOR HISTORY NAVIGATION ---

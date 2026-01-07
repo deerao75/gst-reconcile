@@ -3663,6 +3663,93 @@ def render_progress(job_id):
     """
     return render_template("progress.html", job_id=job_id)
 
+# ==========================================
+# NEW ROUTE: Excel Consolidation (Preserves Original Headers)
+# ==========================================
+@app.route('/consolidate', methods=['POST'])
+def consolidate_files():
+    if not session.get('logged_in'):
+        flash('Please log in to use this feature.', 'warning')
+        return redirect(url_for('login'))
+
+    files = request.files.getlist("files")
+    if not files or not files[0].filename:
+        flash("No files selected.", "warning")
+        return redirect(url_for("index"))
+
+    try:
+        sheets_map = defaultdict(list)
+        ref_headers = {}
+
+        for file in files:
+            if not file.filename.endswith(('.xls', '.xlsx')):
+                continue
+
+            try:
+                # KEY CHANGE 1: header=None
+                # We read the first row as DATA, not headers. This prevents pandas from
+                # renaming duplicate columns or adding "Unnamed: 0" labels.
+                xls_dict = pd.read_excel(file, sheet_name=None, engine="openpyxl", header=None, dtype=str)
+            except Exception as e:
+                flash(f"Error reading {file.filename}: {e}", "danger")
+                return redirect(url_for("index"))
+
+            for sheet_name, df in xls_dict.items():
+                if df.empty:
+                    continue
+
+                # Clean headers: Extract the first row (index 0) to use as the header reference
+                # We strip whitespace to be safe, but we keep the exact original text.
+                current_header = [str(x).strip() if pd.notna(x) else "" for x in df.iloc[0].tolist()]
+
+                if sheet_name not in ref_headers:
+                    # First file for this sheet?
+                    # Set it as Master Reference and keep the WHOLE dataframe (including Row 0)
+                    ref_headers[sheet_name] = current_header
+                    sheets_map[sheet_name].append(df)
+                else:
+                    # Subsequent files: Validate Row 0 against Master Reference
+                    if current_header != ref_headers[sheet_name]:
+                        flash(f"Header mismatch in file '{file.filename}', sheet '{sheet_name}'. "
+                              f"The column headings in the first row do not match the first file uploaded. "
+                              f"Please ensure all files have identical headers.", "danger")
+                        return redirect(url_for("index"))
+
+                    # Match found! Drop Row 0 (the header) and append only the data
+                    sheets_map[sheet_name].append(df.iloc[1:])
+
+        # Concatenate and Write
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            data_written = False
+            for sheet_name, dfs in sheets_map.items():
+                if dfs:
+                    merged_df = pd.concat(dfs, ignore_index=True)
+
+                    # KEY CHANGE 2: header=False, index=False
+                    # Since the first row of 'merged_df' is already our original header (from the first file),
+                    # we tell pandas NOT to write its own headers. This ensures 100% original fidelity in Row 1.
+                    merged_df.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
+                    data_written = True
+
+            if not data_written:
+                flash("No data found to consolidate.", "warning")
+                return redirect(url_for("index"))
+
+        output.seek(0)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=f"Consolidated_Output_{timestamp}.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        app.logger.error(f"Consolidation Error: {e}")
+        flash("An unexpected error occurred during consolidation.", "danger")
+        return redirect(url_for("index"))
+
 # --- Register Razorpay Blueprint ---
 from payments import payment_bp
 app. register_blueprint(payment_bp)

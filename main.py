@@ -1084,10 +1084,28 @@ def build_dashboard(df_recon: pd.DataFrame, cols: Dict[str, Optional[str]]) -> p
     return df
 
 
-# -------------------- Routes --------------------
 @app.route("/", methods=["GET"])
 def index():
-    return render_template("index.html")
+    # Default to False
+    is_active = False
+
+    # Check if user is logged in
+    if session.get('logged_in'):
+        # Fetch the user record from the database
+        user = User.query.get(session.get('user_id'))
+        if user:
+            # Check both the 'subscribed' flag and the expiry date
+            subscribed = getattr(user, "subscribed", False)
+            expiry = getattr(user, "subscription_expiry_date", None)
+            try:
+                # User is active ONLY if subscribed is True AND date is valid/future
+                if subscribed and expiry and expiry >= date.today():
+                    is_active = True
+            except Exception:
+                pass
+
+    # Pass the result to the template so the JavaScript check works
+    return render_template("index.html", is_active_subscriber=is_active)
 
 # REPLACEMENT FUNCTION: Protects the reconciliation module.
 @app.route("/verify", methods=["POST"])
@@ -3749,6 +3767,39 @@ def consolidate_files():
         app.logger.error(f"Consolidation Error: {e}")
         flash("An unexpected error occurred during consolidation.", "danger")
         return redirect(url_for("index"))
+
+# ==========================================
+# NEW ROUTE: Delete History (Database Only)
+# ==========================================
+@app.route('/delete_history/<report_id>', methods=['POST'])
+def delete_history(report_id):
+    """
+    Removes the record from the database table ONLY.
+    Does NOT attempt to connect to Google Drive.
+    """
+    if not session.get('logged_in'):
+        flash('Please log in to perform this action.', 'warning')
+        return redirect(url_for('login'))
+
+    try:
+        # 1. Find the record in the database using the Drive File ID
+        record = ReconciliationReport.query.filter_by(drive_file_id=report_id).first()
+
+        if record:
+            # 2. Delete the record from the database
+            db.session.delete(record)
+            db.session.commit()
+            flash('Report removed from history list.', 'success')
+        else:
+            # Even if not found, we treat it as success so it "disappears" from the user's view
+            flash('Record not found (may have already been removed).', 'info')
+
+    except Exception as e:
+        app.logger.error(f"Database Removal Error: {e}")
+        db.session.rollback() # Important: Reset DB connection if it got stuck
+        flash('Could not remove row. Please try again.', 'danger')
+
+    return redirect(url_for('history'))
 
 # --- Register Razorpay Blueprint ---
 from payments import payment_bp

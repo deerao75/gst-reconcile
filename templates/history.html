@@ -10,7 +10,7 @@
         margin-top: 30px;
         border: 1px solid #eee;
     }
-    . top-actions {
+    .top-actions {
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -28,6 +28,20 @@
     }
     .btn-primary { background: #ffad33; color: #000; }
     .btn-secondary { background: #e9ecef; color: #333; margin-right: 10px; }
+
+    /* New Delete Button Style */
+    .btn-delete {
+        background: #dc3545;
+        color: #fff;
+        padding: 8px 16px;
+        border: none;
+        border-radius: 4px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    .btn-delete:hover { background: #bb2d3b; }
 
     table { width: 100%; border-collapse: collapse; }
     th { background: #FCE4D6; padding: 12px; text-align: left; font-weight: bold; border-bottom: 2px solid #ddd; }
@@ -54,22 +68,28 @@
             <thead>
                 <tr>
                     <th style="width:  5%;">#</th>
-                    <th style="width: 45%;">Report Name</th>
-                    <th style="width: 30%;">Date & Time</th>
-                    <th style="text-align: center; width: 20%;">Action</th>
+                    <th style="width: 40%;">Report Name</th>
+                    <th style="width: 25%;">Date & Time</th>
+                    <th style="text-align: center; width: 30%;">Action</th>
                 </tr>
             </thead>
             <tbody>
                 {% for report in reports %}
                 <tr>
                     <td>{{ loop.index }}</td>
-                    <td style="font-weight:600;">{{ report. report_name }}</td>
+                    <td style="font-weight:600;">{{ report.report_name }}</td>
                     <td style="color:#555;">{{ report.generated_at }}</td>
                     <td style="text-align:center">
-                        <a href="{{ url_for('download_history', report_id=report.drive_file_id) }}"
-                           style="background:#212529; color:#fff; padding:8px 16px; border-radius: 4px; text-decoration:none; font-size:0.85rem; font-weight:600;">
-                           Download
-                        </a>
+                        <div style="display: flex; gap: 10px; justify-content: center;">
+                            <a href="{{ url_for('download_history', report_id=report.drive_file_id) }}"
+                               style="background:#212529; color:#fff; padding:8px 16px; border-radius: 4px; text-decoration:none; font-size:0.85rem; font-weight:600;">
+                               Download
+                            </a>
+
+                            <button class="btn-delete" onclick="deleteRow(this, '{{ report.drive_file_id }}')">
+                                Delete
+                            </button>
+                        </div>
                     </td>
                 </tr>
                 {% endfor %}
@@ -86,4 +106,31 @@
     </div>
     {% endif %}
 </div>
+
+<script>
+    function deleteRow(btn, reportId) {
+        if(!confirm('Are you sure you want to remove this report from the list?')) {
+            return;
+        }
+
+        // 1. Visually remove the row IMMEDIATELY
+        var row = btn.closest('tr');
+        if (row) {
+            row.style.transition = "opacity 0.5s";
+            row.style.opacity = "0";
+            setTimeout(function() {
+                row.remove();
+            }, 500);
+        }
+
+        // 2. Silently tell server to delete from DB (if possible)
+        // We use fetch so the page does NOT reload.
+        fetch('/delete_history/' + reportId, {
+            method: 'POST'
+        }).catch(err => {
+            // We ignore errors because we just want the row gone.
+            console.log("Background delete attempt finished.");
+        });
+    }
+</script>
 {% endblock %}

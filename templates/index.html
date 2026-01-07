@@ -165,6 +165,27 @@
   </div>
 </div>
 
+<div id="message-modal" class="instruction-modal">
+  <div class="instruction-modal-content" style="max-width: 500px; text-align: center;">
+    <h2 id="msg-modal-title" style="color: #000; margin-top: 0;">Notice</h2>
+    <p id="msg-modal-text" style="font-size: 1.1rem; margin: 20px 0; text-align: center; color: #333;"></p>
+    <hr>
+    <button type="button" class="instruction-modal-close-cta" id="msg-modal-ok-btn" style="background-color: #ffb74d; color: #000; font-weight: 600; width: 120px; margin: 0 auto;">OK</button>
+  </div>
+</div>
+
+<div id="confirmation-modal" class="instruction-modal">
+  <div class="instruction-modal-content" style="max-width: 500px; text-align: center;">
+    <h2 style="color: #000; margin-top: 0;">Confirm Consolidation</h2>
+    <p id="conf-modal-text" style="font-size: 1.1rem; margin: 20px 0; text-align: center; color: #333;"></p>
+    <hr>
+    <div style="display: flex; justify-content: center; gap: 20px; margin-top: 20px;">
+        <button type="button" class="cta" id="conf-modal-cancel-btn" style="background-color: #e0e0e0; color: #000; font-weight: 600; width: 120px; border: 1px solid #ccc;">Cancel</button>
+        <button type="button" class="cta" id="conf-modal-ok-btn" style="background-color: #ffb74d; color: #000; font-weight: 600; width: 120px; border-color: #ffb74d;">OK</button>
+    </div>
+  </div>
+</div>
+
 <div id="processingOverlay" role="status" aria-hidden="true" aria-live="polite">
   <div class="processing-box" role="dialog" aria-modal="true">
 
@@ -384,22 +405,58 @@ section.panel {
       });
   }
 
-  // --- NEW: Handle Consolidation with Stats & Validation ---
-  async function handleConsolidation(event, form) {
-      event.preventDefault(); // Stop default submit
+  // --- MODAL HELPERS ---
+  let pendingForm = null;
 
+  function openMessageModal(title, text) {
+      document.getElementById('msg-modal-title').innerText = title;
+      document.getElementById('msg-modal-text').innerText = text;
+      document.getElementById('message-modal').style.display = 'flex';
+  }
+
+  function openConfirmModal(text, form) {
+      document.getElementById('conf-modal-text').innerText = text;
+      document.getElementById('confirmation-modal').style.display = 'flex';
+      pendingForm = form;
+  }
+
+  function closeAllModals() {
+      document.getElementById('message-modal').style.display = 'none';
+      document.getElementById('confirmation-modal').style.display = 'none';
+      const valModal = document.getElementById('validation-modal');
+      if (valModal) valModal.style.display = 'none';
+      pendingForm = null;
+  }
+
+  // --- Main Handle Consolidate Function ---
+  function handleConsolidation(event, form) {
+      event.preventDefault(); // Stop default submission
+
+      // 1. Auth Check
+      const isLoggedIn = {{ 'true' if session.get('logged_in') else 'false' }};
+      const isSubscribed = {{ 'true' if is_active_subscriber|default(false) else 'false' }};
+
+      if (!isLoggedIn || !isSubscribed) {
+          openMessageModal("Access Restricted", "Login and Subscribe to consolidate.");
+          return;
+      }
+
+      // 2. File Check
       const fileInput = form.querySelector('input[type="file"]');
-
-      // Case 1: No files selected
       if (!fileInput || fileInput.files.length === 0) {
-          alert("No files are uploaded.");
-          return false;
+          openMessageModal("Files Missing", "No files are uploaded.");
+          return;
       }
 
-      // Case 2: Confirmation
-      if (!confirm("Ensure the no. of columns and column headings are identical in each file for the purpose of consolidation.")) {
-          return false;
-      }
+      // 3. Trigger Custom Confirmation Modal
+      openConfirmModal("Ensure the no. of columns and column headings are identical in each file for the purpose of consolidation.", form);
+  }
+
+  // --- Async Execution (Called after Confirm OK) ---
+  async function executeConsolidation() {
+      if (!pendingForm) return;
+      const form = pendingForm;
+      const fileInput = form.querySelector('input[type="file"]');
 
       // --- START PROCESSING UI ---
       const overlay = document.getElementById('processingOverlay');
@@ -409,10 +466,9 @@ section.panel {
       const spinner = document.getElementById('proc-spinner');
       const closeContainer = document.getElementById('proc-close-container');
 
-      // Ensure clean state
       spinner.style.display = 'block';
       closeContainer.style.display = 'none';
-      stats.style.display = 'block'; // Show stats area
+      stats.style.display = 'block';
 
       overlay.style.display = 'flex';
       overlay.setAttribute('aria-hidden', 'false');
@@ -432,31 +488,16 @@ section.panel {
               const data = await file.arrayBuffer();
               const workbook = XLSX.read(data);
 
-              // --- UPDATED LOGIC: Scan ALL sheets to find MAX rows ---
               let maxRowsInFile = 0;
-              let maxSheetName = "";
-
-              // Iterate through all sheets
               workbook.SheetNames.forEach(sheetName => {
                   const worksheet = workbook.Sheets[sheetName];
-
-                  // Check if sheet has valid ref
                   if (!worksheet['!ref']) return;
-
                   const range = XLSX.utils.decode_range(worksheet['!ref']);
-                  // Calculate row count: End - Start
-                  // Assuming Row 1 is header, subtract 1. (Safety check if < 0)
                   let rowCount = range.e.r - range.s.r;
                   if (rowCount < 0) rowCount = 0;
-
-                  // Keep the maximum found so far
-                  if (rowCount > maxRowsInFile) {
-                      maxRowsInFile = rowCount;
-                      maxSheetName = sheetName;
-                  }
+                  if (rowCount > maxRowsInFile) maxRowsInFile = rowCount;
               });
 
-              // Add maximum found rows to total
               totalRows += maxRowsInFile;
               fileStatsHtml += `<li><strong>${file.name}</strong>: ${maxRowsInFile} rows</li>`;
           }
@@ -474,8 +515,7 @@ section.panel {
       stats.innerHTML = fileStatsHtml;
       sub.textContent = "Sending data to server & generating file...";
 
-      // --- SUBMIT TO SERVER VIA FETCH (AJAX) ---
-      // We use fetch so we can detect when it's done and reset the form
+      // --- SUBMIT TO SERVER ---
       const formData = new FormData(form);
 
       try {
@@ -485,7 +525,6 @@ section.panel {
           });
 
           if (response.ok) {
-              // Extract filename from header or default
               let filename = "consolidated.xlsx";
               const disposition = response.headers.get('Content-Disposition');
               if (disposition && disposition.indexOf('attachment') !== -1) {
@@ -496,7 +535,6 @@ section.panel {
                   }
               }
 
-              // Create Blob and Download
               const blob = await response.blob();
               const url = window.URL.createObjectURL(blob);
               const a = document.createElement('a');
@@ -507,32 +545,25 @@ section.panel {
               window.URL.revokeObjectURL(url);
               a.remove();
 
-              // --- SUCCESS STATE: HOLD DISPLAY ---
-              // Instead of auto-resetting, we update the UI and wait for user to click Close
-              spinner.style.display = 'none'; // Hide Spinner
+              spinner.style.display = 'none';
               title.textContent = "Consolidation Complete";
               sub.textContent = "File downloaded successfully.";
-
-              // Show Close Button
               closeContainer.style.display = 'block';
 
           } else {
-              // Handle Server Errors (e.g. Column Mismatch)
-              // If server returns HTML (flash message redirect), we might need to reload or parse
-              // Ideally, server returns error text. For now, assume simple redirect or text.
               const text = await response.text();
-              // If it's a redirect to index (html), we reload to show flash messages
               if (text.includes("<!doctype html>") || response.redirected) {
                   window.location.reload();
               } else {
-                  alert("Error during consolidation: " + response.statusText);
+                  // Use our new modal instead of alert
                   closeConsolidationOverlay();
+                  openMessageModal("Error", "Error during consolidation: " + response.statusText);
               }
           }
       } catch (error) {
           console.error("Submission error:", error);
-          alert("An error occurred while connecting to the server.");
           closeConsolidationOverlay();
+          openMessageModal("Error", "An error occurred while connecting to the server.");
       }
   }
 
@@ -542,25 +573,36 @@ section.panel {
     const instModal = document.getElementById('instruction-modal');
     const customModal = document.getElementById('custom-format-modal');
     const valModal = document.getElementById('validation-modal');
+    const msgModal = document.getElementById('message-modal');
+    const confModal = document.getElementById('confirmation-modal');
 
     // --- Open Buttons ---
     const instBtn = document.getElementById('instruction-btn');
     const customBtn = document.getElementById('custom-format-btn');
 
-    // --- Generic Close Button Handler ---
-    const allCloseBtns = document.querySelectorAll('.instruction-modal-close-btn, .instruction-modal-close-cta');
-
     // --- Event Listeners for Opening Modals ---
     if (instBtn) instBtn.addEventListener('click', () => { if(instModal) instModal.style.display = 'flex'; });
     if (customBtn) customBtn.addEventListener('click', () => { if(customModal) customModal.style.display = 'flex'; });
 
-    // --- Event Listeners for Closing Modals ---
+    // --- Event Listeners for Closing Modals (X buttons and OK buttons) ---
+    const allCloseBtns = document.querySelectorAll('.instruction-modal-close-btn, .instruction-modal-close-cta');
     allCloseBtns.forEach(btn => {
         btn.addEventListener('click', () => {
+            closeAllModals();
             if (instModal) instModal.style.display = 'none';
             if (customModal) customModal.style.display = 'none';
             if (valModal) valModal.style.display = 'none';
         });
+    });
+
+    // --- Special Confirm Modal Buttons ---
+    const confCancel = document.getElementById('conf-modal-cancel-btn');
+    const confOK = document.getElementById('conf-modal-ok-btn');
+
+    if (confCancel) confCancel.addEventListener('click', closeAllModals);
+    if (confOK) confOK.addEventListener('click', () => {
+        closeAllModals();
+        executeConsolidation();
     });
 
     // --- Close Modals on Click Outside ---
@@ -568,6 +610,8 @@ section.panel {
       if (instModal && event.target === instModal) instModal.style.display = 'none';
       if (customModal && event.target === customModal) customModal.style.display = 'none';
       if (valModal && event.target === valModal) valModal.style.display = 'none';
+      if (msgModal && event.target === msgModal) msgModal.style.display = 'none';
+      if (confModal && event.target === confModal) confModal.style.display = 'none';
     });
 
     // --- FORM SUBMISSION (Main Recon) ---
@@ -583,12 +627,9 @@ section.panel {
             }
             const overlay = document.getElementById('processingOverlay');
             if (overlay) {
-                // Ensure text is reset for Recon
                 document.getElementById('proc-title').textContent = "Column mapping between 2B and Purchase Register in Progress";
                 document.getElementById('proc-sub').textContent = "Please wait — this operation may take a few seconds. The page will update automatically when ready.";
                 document.getElementById('proc-stats').style.display = 'none';
-
-                // Hide consolidation-specific elements
                 document.getElementById('proc-close-container').style.display = 'none';
                 document.getElementById('proc-spinner').style.display = 'block';
 

@@ -204,11 +204,12 @@
   </div>
 </div>
 
-
 <style>
-/* 1. LAYOUT STYLES - Flexbox Centering */
 .main-layout-wrapper {
-  width: 98vw;
+  width: 96vw;
+  max-width: 1920px;
+  margin: 0 auto;
+  padding:  0;
   position: relative;
   left: 50%;
   transform: translateX(-50%);
@@ -216,14 +217,16 @@
   /* Flex Layout */
   display: flex;
   flex-direction: row;
-  justify-content: center; /* This centers the (Sidebar + Panel + Sidebar) group */
+  flex-wrap: nowrap; /* ADD THIS - Forces horizontal always */
+  justify-content: center;
   align-items: flex-start;
-  gap: 30px;
+  gap: 20px;
 }
 
 /* 2. SIDEBAR STYLES (Both Left and Right) */
 .consolidation-sidebar, .remarks-sidebar {
-  width: 320px; /* Fixed Width for perfect balance */
+  width: 20%; /* Changed from fixed 320px to percentage */
+  min-width: 260px; /* Ensure it doesn't get too small */
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -232,7 +235,7 @@
 
 /* 3. CONSOLIDATION BOXES - DARK THEME */
 .consolidation-box {
-  background: #1f1f1f;
+  background: #2f2f2f;
   border: 1px solid rgba(255,255,255,0.15);
   border-radius: 12px;
   padding: 1.2rem 1.5rem;
@@ -245,14 +248,13 @@
 
 /* 4. MAIN PANEL CONTROLLER */
 section.panel {
-  flex-grow: 0;
-  flex-shrink: 0;
-  width: 900px; /* Fixed comfortable reading width */
+  flex: 1; /* Changed to flex: 1 to fill remaining space automatically */
+  width: auto; /* Removed fixed 900px */
   margin: 0 !important;
-  background: #1f1f1f;
+  background: #2f2f2f;
   border: 1px solid rgba(255,255,255,0.1);
   color: #fff;
-  padding: 2rem;
+  padding: 1.5rem; /* Slightly reduced padding to save space */
   border-radius: 12px;
 }
 
@@ -261,7 +263,7 @@ section.panel {
   margin-top: 0;
   padding: 1.2rem 1.5rem;
   border-radius: 12px;
-  background: #1f1f1f; /* Matching Dark Theme */
+  background: #2f2f2f; /* Matching Dark Theme */
   color: #fff;
   border: 1px solid rgba(255,255,255,0.15);
   text-align: justify;
@@ -303,7 +305,7 @@ section.panel {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* Responsive Handling */
-@media (max-width: 1400px) {
+@media (max-width: 1024px) { /* Changed 1400px to 1024px (Tablet Mode) */
   .main-layout-wrapper {
     flex-direction: column;
     align-items: center;
@@ -313,14 +315,14 @@ section.panel {
   }
 
   .consolidation-sidebar, .remarks-sidebar {
-    width: 100%;
+    width: 95%; /* Make full width on mobile/tablet */
     max-width: 900px;
-    flex-direction: row; /* Arrange boxes side-by-side on top/bottom */
+    flex-direction: row;
     margin-bottom: 20px;
   }
 
   .consolidation-box, .remark-box { flex: 1; }
-  section.panel { width: 100%; max-width: 900px; order: -1; /* Keep panel? Or put sidebars first? Default order usually fine */ }
+  section.panel { width: 95%; max-width: 900px; order: -1; }
 }
 
 @media (max-width: 768px) {

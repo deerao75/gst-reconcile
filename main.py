@@ -299,9 +299,9 @@ GSTIN_CANDIDATES_PR = [
 DATE_CANDIDATES_PR = [
     "invoice date", "vendor invoice date", "supplier invoice date", "bill date", "doc date", "document date", "date"
 ]
-CGST_CANDIDATES_PR = ["cgst", "cgst amount", "central tax", "central tax amount"]
-SGST_CANDIDATES_PR = ["sgst", "sgst amount", "state tax", "state tax amount", "utgst", "utgst amount"]
-IGST_CANDIDATES_PR = ["igst", "igst amount", "integrated tax", "integrated tax amount"]
+CGST_CANDIDATES_PR = ["cgst", "cgst amount", "central tax", "central tax amount", "cgst tax"]
+SGST_CANDIDATES_PR = ["sgst", "sgst amount", "state tax", "state tax amount", "sgst tax"]
+IGST_CANDIDATES_PR = ["igst", "igst amount", "integrated tax", "integrated tax amount", "igst tax"]
 TAXABLE_CANDIDATES_PR = ["taxable value", "taxable amount", "assessable value", "taxable"]
 TOTAL_TAX_CANDIDATES_PR = ["total tax", "total tax amount", "tax amount"]
 INVOICE_VALUE_CANDIDATES_PR = ["invoice value", "total invoice value", "value of invoice", "invoice total"]

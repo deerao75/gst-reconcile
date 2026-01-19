@@ -6,35 +6,122 @@
 <div class="main-layout-wrapper">
 
   <aside class="consolidation-sidebar">
+    <script>
+      // COOKIE HELPER: Checks if the "Done" cookie exists
+      function getCookie(name) {
+          const value = `; ${document.cookie}`;
+          const parts = value.split(`; ${name}=`);
+          if (parts.length === 2) return parts.pop().split(';').shift();
+      }
+
+      // COOKIE DELETER: Cleans up after we are done
+      function deleteCookie(name) {
+          document.cookie = name + '=; Max-Age=-99999999; path=/';
+      }
+
+      // MAIN FUNCTION: Handles UI during consolidation
+      function startConsolidation(btn) {
+          const form = btn.closest('form');
+          const input = form.querySelector('input[type="file"]');
+
+          // 1. Validation
+          if (!input.files || input.files.length === 0) {
+              // Use your existing modal for errors if possible, or standard alert
+              if(typeof openMessageModal === 'function') {
+                  openMessageModal("Error", "Please select files first.");
+              } else {
+                  alert("Please select files first.");
+              }
+              return;
+          }
+
+          // 2. Change Button State
+          const originalText = btn.innerText;
+          btn.innerText = "Consolidating...";
+          btn.disabled = true;
+          btn.style.opacity = "0.7";
+
+          // 3. Clear any old cookies just in case
+          deleteCookie("consolidation_complete");
+
+          // 4. Submit the form to start download
+          form.submit();
+
+          // 5. Start Polling for the "Done" Cookie
+          const checkInterval = setInterval(() => {
+              if (getCookie("consolidation_complete") === 'true') {
+                  clearInterval(checkInterval);
+
+                  // RESET UI
+                  btn.innerText = originalText;
+                  btn.disabled = false;
+                  btn.style.opacity = "1";
+                  deleteCookie("consolidation_complete");
+
+                  // SHOW SUCCESS MESSAGE
+                  // We override the OK button to reload the page when clicked
+                  if(typeof openMessageModal === 'function') {
+                      openMessageModal("Success", "Files have been consolidated successfully.");
+
+                      // Find the OK button in your modal and make it reload the page
+                      const okBtn = document.getElementById('msg-modal-ok-btn');
+                      if (okBtn) {
+                          okBtn.onclick = function() {
+                              window.location.reload(); // This clears the sidebar selection
+                          };
+                      }
+                  }
+              }
+          }, 1000); // Check every 1 second
+      }
+    </script>
 
     <div class="consolidation-box">
       <h3 style="color: #ff9500;">Consolidate GSTR-2B</h3>
-      <p class="hint">If you have multiple GSTR 2B files or wish to run reco for multiple registrations at once, merge the files into one file before upload.</p>
-      <form id="form-2b" action="{{ url_for('consolidate_files') }}" method="post" enctype="multipart/form-data" onsubmit="handleConsolidation(event, this)">
+      <p class="hint">Merge multiple GSTR-2B files into one.</p>
+
+      <form id="form-2b" action="{{ url_for('consolidate_files') }}" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="doc_type" value="gstr2b">
+
+        <div style="text-align: left; margin-bottom: 15px; background: rgba(255,255,255,0.05); padding: 10px; border-radius: 8px;">
+            <label style="display: block; margin-bottom: 8px; cursor: pointer;">
+                <input type="radio" name="format_option" value="portal" checked>
+                Portal Format (Drop 6 Heading Rows)
+            </label>
+            <label style="display: block; cursor: pointer;">
+                <input type="radio" name="format_option" value="custom">
+                Other Format (Drop 1 Heading Row)
+            </label>
+        </div>
+
         <label class="filebtn" style="width: 100%; margin-bottom: 10px;">
           Select Files
           <input type="file" name="files" multiple accept=".xls,.xlsx" onchange="updateFileCount(this)">
         </label>
         <p class="upload-confirm" style="margin-top:0; margin-bottom:10px; font-size: 0.85rem; min-height: 1.2em;"></p>
-        <button type="submit" class="cta" style="width: 100%; padding: 10px; font-size: 0.9rem;">Consolidate</button>
+
+        <button type="button" class="cta" style="width: 100%; padding: 10px; font-size: 0.9rem;" onclick="startConsolidation(this)">Consolidate</button>
       </form>
     </div>
 
     <div class="consolidation-box">
       <h3 style="color: #ff9500;">Consolidate PR</h3>
-      <p class="hint">If you have multiple Purchase Register files or wish to run reco for multiple registrations at once, merge the files into one file before upload.</p>
-      <form id="form-pr" action="{{ url_for('consolidate_files') }}" method="post" enctype="multipart/form-data" onsubmit="handleConsolidation(event, this)">
+      <p class="hint">Merge multiple Purchase Register files.</p>
+
+      <form id="form-pr" action="{{ url_for('consolidate_files') }}" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="doc_type" value="pr">
+
         <label class="filebtn" style="width: 100%; margin-bottom: 10px;">
           Select Files
           <input type="file" name="files" multiple accept=".xls,.xlsx" onchange="updateFileCount(this)">
         </label>
         <p class="upload-confirm" style="margin-top:0; margin-bottom:10px; font-size: 0.85rem; min-height: 1.2em;"></p>
-        <button type="submit" class="cta" style="width: 100%; padding: 10px; font-size: 0.9rem;">Consolidate</button>
+
+        <button type="button" class="cta" style="width: 100%; padding: 10px; font-size: 0.9rem;" onclick="startConsolidation(this)">Consolidate</button>
       </form>
     </div>
 
   </aside>
-
   <section class="panel">
     <h1 style="text-align: center; color: #ff9500;">Acer Nova (Beta Version)</h1>
     <h2 style="text-align: center;">GST Reconciliation - Purchase Register vs. GSTR 2B</h2>

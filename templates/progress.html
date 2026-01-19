@@ -3,8 +3,8 @@
 {% block content %}
 <style>
     .progress-wrapper {
-        width: max-content;       /* Auto-stretch to fit content */
-        min-width: 950px;         /* Minimum width */
+        width: max-content; /* Auto-stretch to fit content */
+        min-width: 950px; /* Minimum width */
         margin: 40px auto;
         background: #fff;
         border-radius: 12px;
@@ -21,7 +21,7 @@
 
     .spinner-ring {
         display: inline-block;
-        width: 60px;              /* Slightly larger */
+        width: 60px; /* Slightly larger */
         height: 60px;
         border: 6px solid #f3f3f3;
         border-radius: 50%;
@@ -115,10 +115,8 @@
     .btn-download:hover { background: #333; }
 </style>
 
-<div style="text-align: center;"> <!-- Centering Wrapper -->
-    <div class="progress-wrapper" style="text-align: left;">
+<div style="text-align: center;"> <div class="progress-wrapper" style="text-align: left;">
 
-        <!-- Loading State -->
         <div id="loading-state" class="loading-container">
             <h2 class="loading-title">Reconciliation in Progress</h2>
             <div class="spinner-ring"></div>
@@ -133,7 +131,6 @@
             <p style="color:#888; font-size: 0.9rem; margin-top: 10px;">Please keep this tab open.</p>
         </div>
 
-        <!-- Results State -->
         <div id="dashboard-area">
             <h2 style="text-align:center; margin-bottom:20px;">Reconciliation Complete</h2>
 
@@ -166,8 +163,7 @@
                         </tr>
                     </thead>
                     <tbody id="dash-body">
-                        <!-- Javascript will populate rows here -->
-                    </tbody>
+                        </tbody>
                 </table>
             </div>
 
@@ -208,13 +204,20 @@
             msg.innerText = p.msg;
 
             if (d.state === "finished") {
+                // --- FIXED: Check inside result for 'review_needed' ---
+                if (d.result && d.result.status === "review_needed") {
+                    console.log("Review needed, redirecting...");
+                    window.location.href = "/review_matches?job_id=" + jobId;
+                    return;
+                }
+                // -----------------------------------------------------
+
                 if(d.result && d.result.dashboard_stats) {
                     renderDashboard(d.result.dashboard_stats);
                 }
-
-                // Set links for both buttons
                 dlBtn.href = `/download/${jobId}`;
-                document.getElementById('dl-btn-nm').href = `/download_nm/${jobId}`;
+                const btnNm = document.getElementById('dl-btn-nm');
+                if(btnNm) btnNm.href = `/download_nm/${jobId}`;
 
                 loader.style.display = 'none';
                 dashboard.style.display = 'block';
@@ -235,9 +238,13 @@
     function renderDashboard(data) {
         // 1. Update Counts
         if(data.counts) {
-            document.getElementById('cnt-pr').innerText = data.counts.pr || 0;
-            document.getElementById('cnt-b2b').innerText = data.counts.b2b || 0;
-            document.getElementById('cnt-cdnr').innerText = data.counts.cdnr || 0;
+            const elPr = document.getElementById('cnt-pr');
+            const elB2b = document.getElementById('cnt-b2b');
+            const elCdnr = document.getElementById('cnt-cdnr');
+
+            if(elPr) elPr.innerText = data.counts.pr || 0;
+            if(elB2b) elB2b.innerText = data.counts.b2b || 0;
+            if(elCdnr) elCdnr.innerText = data.counts.cdnr || 0;
         }
 
         // 2. Build Table

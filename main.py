@@ -723,6 +723,25 @@ def reconcile(
     out["Reason"] = reasons
     return out
 
+# --- HELPER FUNCTIONS (Must be at Global Scope for RQ Worker) ---
+
+def _pick_col_contains(df, pattern):
+    """Helper to find a column matching a regex pattern."""
+    if df is None: return None
+    import re
+    pat = re.compile(pattern, re.I)
+    for c in df.columns:
+        if pat.search(str(c)): return c
+    return None
+
+def _find_optional_col(df, pools):
+    """Helper to find the first matching column from a list of candidate lists."""
+    # Ensure _pick_column is available or defined
+    for cands in pools:
+        col = _pick_column(df, cands)
+        if col: return col
+    return None
+
 # -------------------- Pairwise combined output --------------------
 def build_pairwise_recon(
     df_pr: pd.DataFrame, df_2b: pd.DataFrame,
@@ -1808,12 +1827,77 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         inv_type_2b=(inv_type_2b_b2b or inv_type_2b_cdnr)
     )
 
+    state_data = {
+        "combined_df": combined_df,
+        "pair_cols": pair_cols,
+        # Save raw dataframes needed for ITC calc / Comments sheets
+        "df_pr_raw": df_pr_raw,
+        "df_b2b_raw": df_b2b_raw if 'df_b2b_raw' in locals() else None,
+        "df_cdnr_raw": df_cdnr_raw if 'df_cdnr_raw' in locals() else None,
+        "df_impg_raw": df_impg_raw if 'df_impg_raw' in locals() else None,
+        "df_b2b_raw_signed": df_b2b_raw_signed if 'df_b2b_raw_signed' in locals() else None,
+        "df_cdnr_raw_signed": df_cdnr_raw_signed if 'df_cdnr_raw_signed' in locals() else None,
+        "df_impg_raw_signed": df_impg_raw_signed if 'df_impg_raw_signed' in locals() else None,
+        "df_b2b_imports": df_b2b_imports if 'df_b2b_imports' in locals() else None,
+
+        # Save Lookups
+        "row_num_lookup": row_num_lookup,
+        "pr_row_num_lookup": pr_row_num_lookup,
+
+        # Save Column Selections needed for ITC logic
+        "gst_2b_b2b": gst_2b_b2b, "inv_2b_b2b": inv_2b_b2b, "date_2b_b2b": date_2b_b2b,
+        "gst_2b_cdnr": gst_2b_cdnr, "note_2b_cdnr": note_2b_cdnr, "notedate_2b_cdnr": notedate_2b_cdnr,
+        "gst_pr": gst_pr, "inv_pr": inv_pr,
+        "target_return_period": target_return_period,
+
+        # Save columns for specific checks
+        "cgst_pr": cgst_pr, "sgst_pr": sgst_pr, "igst_pr": igst_pr
+    }
+
+    return state_data
+
+def _generate_final_outputs(state_data):
+    # Unpack variables
+    combined_df = state_data["combined_df"]
+
+    # --- FIX 1: Deduplicate columns immediately to prevent crashes ---
+    # This keeps the first occurrence of any duplicate column name and drops the rest.
+    combined_df = combined_df.loc[:, ~combined_df.columns.duplicated()]
+    # -----------------------------------------------------------------
+
+    pair_cols = state_data["pair_cols"]
+    df_pr_raw = state_data["df_pr_raw"]
+    df_b2b_raw = state_data["df_b2b_raw"]
+    df_cdnr_raw = state_data["df_cdnr_raw"]
+    df_impg_raw = state_data["df_impg_raw"]
+    df_b2b_raw_signed = state_data["df_b2b_raw_signed"]
+    df_cdnr_raw_signed = state_data["df_cdnr_raw_signed"]
+    df_impg_raw_signed = state_data["df_impg_raw_signed"]
+    df_b2b_imports = state_data["df_b2b_imports"]
+    row_num_lookup = state_data["row_num_lookup"]
+    pr_row_num_lookup = state_data["pr_row_num_lookup"]
+
+    gst_2b_b2b = state_data["gst_2b_b2b"]
+    inv_2b_b2b = state_data["inv_2b_b2b"]
+    date_2b_b2b = state_data["date_2b_b2b"]
+    gst_2b_cdnr = state_data["gst_2b_cdnr"]
+    note_2b_cdnr = state_data["note_2b_cdnr"]
+    notedate_2b_cdnr = state_data["notedate_2b_cdnr"]
+    gst_pr = state_data["gst_pr"]
+    inv_pr = state_data["inv_pr"]
+    target_return_period = state_data["target_return_period"]
+
+    # Retrieve tax columns if needed for dashboard logic (using safe gets)
+    cgst_pr = state_data.get("cgst_pr")
+    sgst_pr = state_data.get("sgst_pr")
+    igst_pr = state_data.get("igst_pr")
+
     # ------------------ ITC COMPUTATION BY CODE ------------------
 
     # 1. Build Lookup Dictionary
     recon_lookup = {}
     try:
-        if 'combined_df' in locals() and not combined_df.empty:
+        if combined_df is not None and not combined_df.empty:
             for _, r in combined_df.iterrows():
                 k = (as_text(r.get("_GST_KEY", "")), as_text(r.get("_INV_KEY", "")))
                 recon_lookup[k] = (r.get("Mapping", ""), r.get("Remarks", ""), r.get("Reason", ""))
@@ -1909,7 +1993,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
     # 4A1
     impg_ig, _, _ = pick_tax_cols_for_sheet(df_impg_raw)
-    val_4a1_flat = sum_column(df_b2b_imports, pick_tax_cols_for_sheet(df_b2b_imports)[0]) if 'df_b2b_imports' in locals() else 0.0
+    val_4a1_flat = sum_column(df_b2b_imports, pick_tax_cols_for_sheet(df_b2b_imports)[0]) if (df_b2b_imports is not None and not df_b2b_imports.empty) else 0.0
     val_4a1_igst = sum_column(df_impg_raw_signed, impg_ig) + val_4a1_flat
 
     # 4A3 (RCM)
@@ -2031,6 +2115,7 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
     }
     # ------------------ END ITC COMPUTATION ------------------
 
+    # Rebuild Lookup for Comments
     recon_lookup = {}
     for _, row in combined_df.iterrows():
         key = (as_text(row.get("_GST_KEY", "")), as_text(row.get("_INV_KEY", "")))
@@ -2045,16 +2130,9 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         def get_recon_status(row):
             key = (row["_GST_KEY"], row["_INV_KEY"])
             mapping, remarks, reason = recon_lookup.get(key, ("", "", ""))
-
-            # Get row number and period from lookup
             row_num_2b = ""
-
-
-            # Only populate for Matched and Almost Matched
             if mapping in ["Matched", "Almost Matched"]:
                 row_num_2b = row_num_lookup.get(key, "")
-
-
             return pd.Series([mapping, remarks, reason, row_num_2b])
 
         pr_comments[["Mapping", "Remarks", "Reason", "Row number in 2B"]] = pr_comments.apply(get_recon_status, axis=1)
@@ -2065,149 +2143,68 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         pr_comments["Reason"] = ""
         pr_comments["Row number in 2B"] = ""
 
-    # --------- REPLACEMENT: Build B2B / CDNR comments and add Tax Period column (FINAL INTEGRATED) ---------
-    # This block builds gstr2b_comments and gstr2b_cdnr_comments, fills Mapping/Remarks/Reason,
-    # computes "Tax Period" with robust parsing and fallbacks, and ensures the column is kept
-    # when writing the "GSTR 2B B2B - Comments" and "GSTR 2B CDNR - Comments" sheets.
-
     from collections import Counter
 
     def _parse_month_year_string(s):
-        """Return (year, month) or None for common month-year representations."""
-        if s is None:
-            return None
+        if s is None: return None
         s = str(s).strip()
-        if not s:
-            return None
+        if not s: return None
         s_clean = re.sub(r'[^A-Za-z0-9\s\/\-\:]', ' ', s).strip()
         fmts = ["%b %Y", "%B %Y", "%m/%Y", "%m-%Y", "%Y-%m", "%b-%Y", "%B-%Y", "%m %Y", "%Y %b", "%Y %B"]
         for fmt in fmts:
             try:
                 dt = datetime.strptime(s_clean, fmt)
                 return (dt.year, dt.month)
-            except Exception:
-                pass
+            except Exception: pass
         m = re.search(r'(\d{2})\s*[/\-]?\s*(\d{4})$', s)
         if m:
             mo = int(m.group(1)); yr = int(m.group(2))
-            if 1 <= mo <= 12:
-                return (yr, mo)
+            if 1 <= mo <= 12: return (yr, mo)
         m2 = re.search(r'(\d{4})\s*[/\-]?\s*(\d{2})$', s)
         if m2:
             yr = int(m2.group(1)); mo = int(m2.group(2))
-            if 1 <= mo <= 12:
-                return (yr, mo)
+            if 1 <= mo <= 12: return (yr, mo)
         try:
             dt = pd.to_datetime(s, errors='coerce')
-            if not pd.isna(dt):
-                return (int(dt.year), int(dt.month))
-        except Exception:
-            pass
+            if not pd.isna(dt): return (int(dt.year), int(dt.month))
+        except Exception: pass
         return None
-
-    def _tax_period_from_gstr1_cell(v):
-        """
-        Returns formatted Tax Period like 'Sep 2025' or ''.
-        Rules:
-          - If v parses as a date (parse_date_cell) -> if day >= 12 => month of that date, else previous month.
-          - Else if v looks like a month-year string -> use that month/year.
-          - Else return empty string.
-        """
-        # 1) try date parse (day-sensitive)
-        d = parse_date_cell(v)
-        if d:
-            if d.day >= 12:
-                y, m = d.year, d.month
-            else:
-                if d.month == 1:
-                    y, m = d.year - 1, 12
-                else:
-                    y, m = d.year, d.month - 1
-            return datetime(year=y, month=m, day=1).strftime("%b %Y")
-
-        # 2) try month-year parse
-        my = _parse_month_year_string(v)
-        if my:
-            y, m = my
-            return datetime(year=y, month=m, day=1).strftime("%b %Y")
-
-        return ""
-
 
     def _find_exact_filing_date_col(df):
-        """
-        Return column name matching 'GSTR-1/IFF/GSTR-5 Filing Date' or variations.
-        Prioritizes columns explicitly containing 'date' to avoid picking 'Filing Period'.
-        """
-        if df is None or df.empty:
-            return None
-
-        # 1. Strict Check: Normalize and look for specific known headers
-        # We want to match "filing date", avoiding "filing period" or "filing status"
+        if df is None or df.empty: return None
         target_keywords = ["filing date", "filingdate", "date of filing"]
-
         for c in df.columns:
             cn = str(c).lower()
-            # Clean up delimiters to handle GSTR-1/IFF vs GSTR 1 IFF, etc.
             cn_clean = re.sub(r'[^a-z0-9]', '', cn)
-
-            # Check if it looks like a filing date column
-            # It MUST contain "date" and ("filing" or "gstr1" or "iff")
             if "date" in cn_clean:
                 if "filing" in cn_clean or "gstr1" in cn_clean or "iff" in cn_clean:
-                    # Explicitly EXCLUDE "period" to prevent grabbing "Filing Period"
-                    if "period" not in cn_clean:
-                        return c
-
-        # 2. Fallback: If no explicit "filing date" found, check for generic "Filing Date"
-        # (Only if it doesn't contain "period")
+                    if "period" not in cn_clean: return c
         for c in df.columns:
             cn = str(c).lower()
-            if "filing" in cn and "date" in cn and "period" not in cn:
-                return c
-
+            if "filing" in cn and "date" in cn and "period" not in cn: return c
         return None
 
-    def _tax_period_from_date_cell_dayrule(v):
-        """Return 'Mon YYYY' or '' from an invoice/note date value using day>=12 rule."""
-        d = parse_date_cell(v)
-        if not d:
-            return ""
-        if d.day >= 12:
-            y, m = d.year, d.month
-        else:
-            if d.month == 1:
-                y, m = d.year - 1, 12
+    def _tax_period_from_filing_date_cell(v):
+        try:
+            d = parse_date_cell(v)
+            if not d: return ""
+            y, m = int(d.year), int(d.month)
+            if d.day >= 12: pass
             else:
-                y, m = d.year, d.month - 1
-        return datetime(year=y, month=m, day=1).strftime("%b %Y")
-
-    def _fill_tax_period_with_modal(df, candidate_periods, target_col):
-        """Fill blanks in df[target_col] with modal period if modal is meaningful. Return number filled."""
-        non_empty = [p for p in candidate_periods if p]
-        if not non_empty:
-            return 0
-        modal, count = Counter(non_empty).most_common(1)[0]
-        if count >= 2 or (count / max(1, len(candidate_periods)) >= 0.20):
-            blanks = df[target_col].astype(str).map(lambda x: not bool(str(x).strip()))
-            df.loc[blanks, target_col] = modal
-            return int(blanks.sum())
-        return 0
+                if m == 1: y, m = y - 1, 12
+                else: y, m = y, m - 1
+            return datetime(year=y, month=m, day=1).strftime("%b %Y")
+        except Exception: return ""
 
     # Build gstr2b_comments (B2B)
     try:
-        if df_b2b_raw is not None and not df_b2b_raw.empty:
-            gstr2b_comments = df_b2b_raw.copy()
-        else:
-            gstr2b_comments = pd.DataFrame()
+        gstr2b_comments = df_b2b_raw.copy() if (df_b2b_raw is not None and not df_b2b_raw.empty) else pd.DataFrame()
     except Exception:
         gstr2b_comments = pd.DataFrame()
 
     def _get_b2b_row_status(row):
-        if not gst_2b_b2b or not inv_2b_b2b:
-            return pd.Series(["", "", "", ""])
-        if gst_2b_b2b not in row or inv_2b_b2b not in row:
-            return pd.Series(["", "", "", ""])
+        if not gst_2b_b2b or not inv_2b_b2b: return pd.Series(["", "", "", ""])
+        if gst_2b_b2b not in row or inv_2b_b2b not in row: return pd.Series(["", "", "", ""])
         try:
             gst_val = clean_gstin(row[gst_2b_b2b])
             inv_val = inv_basic(row[inv_2b_b2b])
@@ -2220,35 +2217,24 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
         except Exception:
             return pd.Series(["", "", "", ""])
 
-    # Ensure mapping/comment columns exist
     if gstr2b_comments is not None:
         for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]:
-            if _col not in gstr2b_comments.columns:
-                gstr2b_comments[_col] = ""
+            if _col not in gstr2b_comments.columns: gstr2b_comments[_col] = ""
 
     if not gstr2b_comments.empty:
         try:
             gstr2b_comments[["Mapping", "Remarks", "Reason", "Row Number in PR"]] = gstr2b_comments.apply(_get_b2b_row_status, axis=1)
-        except Exception:
-            gstr2b_comments["Mapping"] = gstr2b_comments.get("Mapping", "")
-            gstr2b_comments["Remarks"] = gstr2b_comments.get("Remarks", "")
-            gstr2b_comments["Reason"] = gstr2b_comments.get("Reason", "")
-            gstr2b_comments["Row Number in PR"] = gstr2b_comments.get("Row Number in PR", "")
+        except Exception: pass
 
     # Build gstr2b_cdnr_comments (CDNR)
     try:
-        if df_cdnr_raw is not None and not df_cdnr_raw.empty:
-            gstr2b_cdnr_comments = df_cdnr_raw.copy()
-        else:
-            gstr2b_cdnr_comments = pd.DataFrame()
+        gstr2b_cdnr_comments = df_cdnr_raw.copy() if (df_cdnr_raw is not None and not df_cdnr_raw.empty) else pd.DataFrame()
     except Exception:
         gstr2b_cdnr_comments = pd.DataFrame()
 
     def _get_cdnr_row_status(row):
-        if not gst_2b_cdnr or not note_2b_cdnr:
-            return pd.Series(["", "", "", ""])
-        if gst_2b_cdnr not in row or note_2b_cdnr not in row:
-            return pd.Series(["", "", "", ""])
+        if not gst_2b_cdnr or not note_2b_cdnr: return pd.Series(["", "", "", ""])
+        if gst_2b_cdnr not in row or note_2b_cdnr not in row: return pd.Series(["", "", "", ""])
         try:
             gst_val = clean_gstin(row[gst_2b_cdnr])
             note_val = inv_basic(row[note_2b_cdnr])
@@ -2263,197 +2249,65 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
     if gstr2b_cdnr_comments is not None:
         for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]:
-            if _col not in gstr2b_cdnr_comments.columns:
-                gstr2b_cdnr_comments[_col] = ""
+            if _col not in gstr2b_cdnr_comments.columns: gstr2b_cdnr_comments[_col] = ""
 
     if not gstr2b_cdnr_comments.empty:
         try:
             gstr2b_cdnr_comments[["Mapping", "Remarks", "Reason", "Row Number in PR"]] = gstr2b_cdnr_comments.apply(_get_cdnr_row_status, axis=1)
-        except Exception:
-            gstr2b_cdnr_comments["Mapping"] = gstr2b_cdnr_comments.get("Mapping", "")
-            gstr2b_cdnr_comments["Remarks"] = gstr2b_cdnr_comments.get("Remarks", "")
-            gstr2b_cdnr_comments["Reason"] = gstr2b_cdnr_comments.get("Reason", "")
-            gstr2b_cdnr_comments["Row Number in PR"] = gstr2b_cdnr_comments.get("Row Number in PR", "")
+        except Exception: pass
 
-    # --------- REPLACEMENT: Strict Filing-Date based Tax Period assignment ---------
-    # Prefer an exact filing-date column "GSTR-1/IFF/GSTR-5 Filing Date" (case-insensitive).
-    # For each row: parse as date using parse_date_cell; if day >= 12 -> Tax Period = month(year) of date;
-    # else Tax Period = previous month (wrap year when month == Jan).
-
-    def _tax_period_from_filing_date_cell(v):
-        """Return 'Mon YYYY' or '' applying exact day>=12 rule on a parsed date."""
-        try:
-            d = parse_date_cell(v)
-            if not d:
-                return ""
-
-            # Force integers
-            y, m = int(d.year), int(d.month)
-
-            if d.day >= 12:
-                pass # y, m are correct
-            else:
-                if m == 1:
-                    y, m = y - 1, 12
-                else:
-                    y, m = y, m - 1
-
-            return datetime(year=y, month=m, day=1).strftime("%b %Y")
-        except Exception:
-            return ""
-
-    # B2B: prefer exact filing-date column
-    filing_col_b2b = _find_exact_filing_date_col(gstr2b_comments if 'gstr2b_comments' in locals() else pd.DataFrame())
-    # If not found, fall back to earlier detected gstr1_period_col_b2b (if present)
-    if not filing_col_b2b:
-        filing_col_b2b = locals().get("gstr1_period_col_b2b", None)
-
-    # Ensure Tax Period column exists
-    if 'gstr2b_comments' not in locals() or gstr2b_comments is None:
-        gstr2b_comments = pd.DataFrame()
-    if "Tax Period" not in gstr2b_comments.columns:
-        gstr2b_comments["Tax Period"] = ""
-
+    # Tax Period Logic
+    filing_col_b2b = _find_exact_filing_date_col(gstr2b_comments)
+    if "Tax Period" not in gstr2b_comments.columns: gstr2b_comments["Tax Period"] = ""
     if not gstr2b_comments.empty:
         if filing_col_b2b and filing_col_b2b in gstr2b_comments.columns:
-            # Use filing date column strictly (vectorized map)
-            try:
-                gstr2b_comments["Tax Period"] = gstr2b_comments[filing_col_b2b].map(_tax_period_from_filing_date_cell)
-            except Exception:
-                gstr2b_comments["Tax Period"] = gstr2b_comments.apply(lambda r: _tax_period_from_filing_date_cell(r.get(filing_col_b2b, None)), axis=1)
+            try: gstr2b_comments["Tax Period"] = gstr2b_comments[filing_col_b2b].map(_tax_period_from_filing_date_cell)
+            except Exception: pass
         else:
-            # Fallback to invoice/date-based rule (if available) so nothing regresses
-            if 'date_2b_b2b' in locals() and date_2b_b2b and date_2b_b2b in gstr2b_comments.columns:
-                try:
-                    gstr2b_comments["Tax Period"] = gstr2b_comments[date_2b_b2b].map(_tax_period_from_filing_date_cell)
-                except Exception:
-                    gstr2b_comments["Tax Period"] = gstr2b_comments.apply(lambda r: _tax_period_from_filing_date_cell(r.get(date_2b_b2b, None)), axis=1)
-            # else leave as-is (modal/fallback could already have filled it)
+            if date_2b_b2b and date_2b_b2b in gstr2b_comments.columns:
+                try: gstr2b_comments["Tax Period"] = gstr2b_comments[date_2b_b2b].map(_tax_period_from_filing_date_cell)
+                except Exception: pass
 
-    # CDNR: prefer exact filing-date column
-    filing_col_cdnr = _find_exact_filing_date_col(gstr2b_cdnr_comments if 'gstr2b_cdnr_comments' in locals() else pd.DataFrame())
-    if not filing_col_cdnr:
-        filing_col_cdnr = locals().get("gstr1_period_col_cdnr", None)
-
-    if 'gstr2b_cdnr_comments' not in locals() or gstr2b_cdnr_comments is None:
-        gstr2b_cdnr_comments = pd.DataFrame()
-    if "Tax Period" not in gstr2b_cdnr_comments.columns:
-        gstr2b_cdnr_comments["Tax Period"] = ""
-
+    filing_col_cdnr = _find_exact_filing_date_col(gstr2b_cdnr_comments)
+    if "Tax Period" not in gstr2b_cdnr_comments.columns: gstr2b_cdnr_comments["Tax Period"] = ""
     if not gstr2b_cdnr_comments.empty:
         if filing_col_cdnr and filing_col_cdnr in gstr2b_cdnr_comments.columns:
-            try:
-                gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments[filing_col_cdnr].map(_tax_period_from_filing_date_cell)
-            except Exception:
-                gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments.apply(lambda r: _tax_period_from_filing_date_cell(r.get(filing_col_cdnr, None)), axis=1)
+            try: gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments[filing_col_cdnr].map(_tax_period_from_filing_date_cell)
+            except Exception: pass
         else:
-            if 'notedate_2b_cdnr' in locals() and notedate_2b_cdnr and notedate_2b_cdnr in gstr2b_cdnr_comments.columns:
-                try:
-                    gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments[notedate_2b_cdnr].map(_tax_period_from_filing_date_cell)
-                except Exception:
-                    gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments.apply(lambda r: _tax_period_from_filing_date_cell(r.get(notedate_2b_cdnr, None)), axis=1)
-            # else leave as-is
+            if notedate_2b_cdnr and notedate_2b_cdnr in gstr2b_cdnr_comments.columns:
+                try: gstr2b_cdnr_comments["Tax Period"] = gstr2b_cdnr_comments[notedate_2b_cdnr].map(_tax_period_from_filing_date_cell)
+                except Exception: pass
 
-    # --------- END: Strict Filing-Date based Tax Period assignment ---------
-
+    # Clean Cols
     cols = list(combined_df.columns)
     if "Invoice Type" in cols:
-        if "_INV_KEY" in cols:
-            idx = cols.index("_INV_KEY") + 1
-        else:
-            idx = 5
-
-        if "Invoice Type" in cols:
-            cols.insert(idx, cols.pop(cols.index("Invoice Type")))
-
+        idx = cols.index("_INV_KEY") + 1 if "_INV_KEY" in cols else 5
+        cols.insert(idx, cols.pop(cols.index("Invoice Type")))
         combined_df = combined_df[cols]
 
-        def _autosize_ws(ws, df, min_w=12, max_w=48, num_fmt=None):
-            sample = df.head(200)
-            for col_idx, col_name in enumerate(df.columns):
-                # 1. Calculate Width
-                header_len = len(str(col_name)) + 4
-                try:
-                    content_len = int(sample[col_name].astype(str).map(len).max())
-                    if isinstance(content_len, float) and math.isnan(content_len):
-                        content_len = 0
-                except Exception:
-                    content_len = 0
-                width = max(min_w, min(max_w, max(header_len, content_len + 2)))
-
-                # 2. Determine Format
-                # Apply number format if column name suggests it is a financial amount
-                curr_fmt = None
-                if num_fmt:
-                    c_str = str(col_name).lower()
-                    # Positive keywords: likely an amount
-                    is_amt = any(x in c_str for x in ['cgst', 'sgst', 'igst', 'cess', 'tax', 'amount', 'value', 'rate', 'total', 'diff', 'sum'])
-                    # Negative keywords: exclude IDs, Dates, Periods, Numbers
-                    is_excl = any(x in c_str for x in ['date', 'gstin', 'id', 'month', 'year', 'period', 'no', 'number', 'row'])
-
-                    # Special logic: "Invoice Value" is an amount, "Invoice Number" is not.
-                    # If it has an amount keyword AND is not in the exclusion list, format it.
-                    if is_amt and not is_excl:
-                        curr_fmt = num_fmt
-
-                ws.set_column(col_idx, col_idx, width, curr_fmt)
-
-    # --------------------------------------------------------------------------
-    # MODIFIED: Helper to autosize AND apply number/text formatting
-    # --------------------------------------------------------------------------
     def _format_and_autosize(ws, df, num_format, text_format):
-        """
-        Autosize columns and apply number format to numeric-looking columns.
-        Applies text_format (Aptos 10) to everything else.
-        """
-        # Removed "credit" from this list to avoid matching "Credit/Debit Note Type"
-        numeric_keywords = ["tax", "value", "amount", "cess", "cgst", "sgst",
-                            "igst", "rate", "total", "cash", "diff"]
-
-        # Explicit exclusions for Date, ID, and Type columns
-        exclude_cols = ["tax period", "filing period", "gstr-1 period", "return period",
-                        "invoice date", "filing date", "note date", "document date", "id",
-                        "note number", "note no", "note type", "supply type", "invoice no",
-                        "invoice number", "document number"]
-
+        numeric_keywords = ["tax", "value", "amount", "cess", "cgst", "sgst", "igst", "rate", "total", "cash", "diff"]
+        exclude_cols = ["tax period", "filing period", "gstr-1 period", "return period", "invoice date", "filing date", "note date", "document date", "id", "note number", "note no", "note type", "supply type", "invoice no", "invoice number", "document number"]
         for col_idx, col_name in enumerate(df.columns):
             col_str = str(col_name).lower()
-
-            # Determine max width
             header_len = len(str(col_name)) + 4
             try:
                 sample = df[col_name].head(200).astype(str)
                 content_len = int(sample.map(len).max())
-                if isinstance(content_len, float) and math.isnan(content_len):
-                    content_len = 0
-            except Exception:
-                content_len = 0
-
+            except Exception: content_len = 0
             width = max(12, min(48, max(header_len, content_len + 2)))
-
-            # Check if this column should be numeric formatted
             is_numeric_col = any(k in col_str for k in numeric_keywords)
             is_excluded = any(ex in col_str for ex in exclude_cols)
-
             if is_numeric_col and not is_excluded:
                 ws.set_column(col_idx, col_idx, width, num_format)
             else:
                 ws.set_column(col_idx, col_idx, width, text_format)
 
-    # --------------------------------------------------------------------------
-    # NEW: Helper to Force Header Color & Font
-    # --------------------------------------------------------------------------
     def _apply_header_style(ws, df, header_fmt):
-        """
-        Pandas to_excel uses its own header format. We must overwrite the
-        first row cells explicitly to apply the background color and font.
-        """
         for col_idx, col_name in enumerate(df.columns):
             ws.write(0, col_idx, col_name, header_fmt)
 
-    # --------------------------------------------------------------------------
-    # Generic Helper to Fix Date/Period Displays
-    # --------------------------------------------------------------------------
     def _fix_datetime_formatting(df):
         if df.empty: return df
         df = df.copy()
@@ -2462,115 +2316,48 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
             if ("period" in cn or "month" in cn) and "invoice date" not in cn:
                 try:
                     s = pd.to_datetime(df[col], errors='coerce')
-                    if s.notna().sum() > 0:
-                        df.loc[s.notna(), col] = s[s.notna()].dt.strftime("%b-%Y")
+                    if s.notna().sum() > 0: df.loc[s.notna(), col] = s[s.notna()].dt.strftime("%b-%Y")
                 except: pass
             elif "filing date" in cn:
                 try:
                     s = pd.to_datetime(df[col], errors='coerce')
-                    if s.notna().sum() > 0:
-                        df.loc[s.notna(), col] = s[s.notna()].dt.strftime("%d-%m-%Y")
+                    if s.notna().sum() > 0: df.loc[s.notna(), col] = s[s.notna()].dt.strftime("%d-%m-%Y")
                 except: pass
         return df
 
-    # --------------------------------------------------------------------------
-    # FIX: Robust Numeric Conversion
-    # --------------------------------------------------------------------------
     def _ensure_numeric_types(df):
         if df.empty: return df
         df = df.copy()
-        numeric_keywords = ["tax", "value", "amount", "cess", "cgst", "sgst",
-                            "igst", "rate", "total", "cash", "diff"]
-        exclude_cols = ["tax period", "filing period", "gstr-1 period", "return period",
-                        "invoice date", "filing date", "note date", "document date", "id",
-                        "note number", "note no", "note type", "supply type", "invoice no",
-                        "invoice number", "document number"]
-
+        numeric_keywords = ["tax", "value", "amount", "cess", "cgst", "sgst", "igst", "rate", "total", "cash", "diff"]
+        exclude_cols = ["tax period", "filing period", "gstr-1 period", "return period", "invoice date", "filing date", "note date", "document date", "id", "note number", "note no", "note type", "supply type", "invoice no", "invoice number", "document number"]
         for col in df.columns:
             cn = str(col).lower()
-            is_numeric_candidate = any(k in cn for k in numeric_keywords)
-            is_excluded = any(ex in cn for ex in exclude_cols)
-            if is_numeric_candidate and not is_excluded:
+            if any(k in cn for k in numeric_keywords) and not any(ex in cn for ex in exclude_cols):
                 try:
-                    df[col] = (df[col].astype(str)
-                                     .str.replace(',', '')
-                                     .str.replace('nan', '', case=False)
-                                     .str.strip())
+                    df[col] = (df[col].astype(str).str.replace(',', '').str.replace('nan', '', case=False).str.strip())
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
                 except: pass
         return df
 
-    # --- Apply Data Fixes ---
-    if 'pr_comments' in locals(): pr_comments = _fix_datetime_formatting(pr_comments)
-    if 'gstr2b_comments' in locals(): gstr2b_comments = _fix_datetime_formatting(gstr2b_comments)
-    if 'gstr2b_cdnr_comments' in locals(): gstr2b_cdnr_comments = _fix_datetime_formatting(gstr2b_cdnr_comments)
-    if 'df_b2b_raw' in locals() and df_b2b_raw is not None: df_b2b_raw = _fix_datetime_formatting(df_b2b_raw)
-    if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None: df_cdnr_raw = _fix_datetime_formatting(df_cdnr_raw)
-
-    if 'pr_comments' in locals(): pr_comments = _ensure_numeric_types(pr_comments)
-    if 'gstr2b_comments' in locals() and not gstr2b_comments.empty: gstr2b_comments = _ensure_numeric_types(gstr2b_comments)
-    if 'gstr2b_cdnr_comments' in locals() and not gstr2b_cdnr_comments.empty: gstr2b_cdnr_comments = _ensure_numeric_types(gstr2b_cdnr_comments)
-
-    if 'df_b2b_raw' in locals() and not df_b2b_raw.empty: df_b2b_raw_export = _ensure_numeric_types(df_b2b_raw)
-    else: df_b2b_raw_export = df_b2b_raw if 'df_b2b_raw' in locals() else pd.DataFrame()
-
-    if 'df_cdnr_raw' in locals() and not df_cdnr_raw.empty: df_cdnr_raw_export = _ensure_numeric_types(df_cdnr_raw)
-    else: df_cdnr_raw_export = df_cdnr_raw if 'df_cdnr_raw' in locals() else pd.DataFrame()
+    if pr_comments is not None: pr_comments = _fix_datetime_formatting(pr_comments)
+    if gstr2b_comments is not None: gstr2b_comments = _fix_datetime_formatting(gstr2b_comments)
+    if gstr2b_cdnr_comments is not None: gstr2b_cdnr_comments = _fix_datetime_formatting(gstr2b_cdnr_comments)
+    df_b2b_raw_export = _ensure_numeric_types(df_b2b_raw) if (df_b2b_raw is not None and not df_b2b_raw.empty) else pd.DataFrame()
+    df_cdnr_raw_export = _ensure_numeric_types(df_cdnr_raw) if (df_cdnr_raw is not None and not df_cdnr_raw.empty) else pd.DataFrame()
+    pr_comments = _ensure_numeric_types(pr_comments)
 
     output = io.BytesIO()
-    with pd.ExcelWriter(
-        output,
-        engine="xlsxwriter",
-        engine_kwargs={"options": {"strings_to_urls": False}},
-    ) as writer:
+    with pd.ExcelWriter(output, engine="xlsxwriter", engine_kwargs={"options": {"strings_to_urls": False}}) as writer:
         wb = writer.book
-
-        # --- Formats (Global Font: Aptos 10) ---
-
-        # Header: Light Orange Background (#FCE4D6), Bold, Border
-        header_fmt = wb.add_format({
-            "bold": True,
-            "bg_color": "#FCE4D6",  # Light Orange
-            "border": 1,
-            "font_name": "Aptos",
-            "font_size": 10,
-            "valign": "vcenter",
-            "align": "left"
-        })
-
-        # Text: Aptos 10, Left Align
-        text_fmt = wb.add_format({
-            "font_name": "Aptos",
-            "font_size": 10,
-            "valign": "vcenter",
-            "align": "left"
-        })
-
-        # Numbers: Aptos 10, Right Align, Comma, 2 Decimals
-        num_fmt = wb.add_format({
-            "num_format": "#,##0.00",
-            "align": "right",
-            "valign": "vcenter",
-            "font_name": "Aptos",
-            "font_size": 10
-        })
-
-        # Highlight: Light Yellow
-        comment_highlight_fmt = wb.add_format({
-            "bg_color": "#FFF2CC",
-            "align": "left",
-            "valign": "vcenter",
-            "font_name": "Aptos",
-            "font_size": 10
-        })
-
-        # Dashboard Formats (All Aptos 10)
+        header_fmt = wb.add_format({"bold": True, "bg_color": "#FCE4D6", "border": 1, "font_name": "Aptos", "font_size": 10, "valign": "vcenter", "align": "left"})
+        text_fmt = wb.add_format({"font_name": "Aptos", "font_size": 10, "valign": "vcenter", "align": "left"})
+        num_fmt = wb.add_format({"num_format": "#,##0.00", "align": "right", "valign": "vcenter", "font_name": "Aptos", "font_size": 10})
+        comment_highlight_fmt = wb.add_format({"bg_color": "#FFF2CC", "align": "left", "valign": "vcenter", "font_name": "Aptos", "font_size": 10})
         dash_title_fmt = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "font_size": 12, "font_name": "Aptos"})
-        dash_table_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#FCE4D6", "font_name": "Aptos", "font_size": 10}) # Updated color
+        dash_table_hdr = wb.add_format({"bold": True, "align": "center", "valign": "vcenter", "border": 1, "bg_color": "#FCE4D6", "font_name": "Aptos", "font_size": 10})
         dash_table_txt = wb.add_format({"border": 1, "align": "left", "valign": "vcenter", "font_name": "Aptos", "font_size": 10})
         dash_table_num = wb.add_format({"num_format": "#,##0.00", "border": 1, "align": "right", "valign": "vcenter", "font_name": "Aptos", "font_size": 10})
         dash_table_lbl = wb.add_format({"bold": True, "border": 1, "align": "left", "valign": "vcenter", "font_name": "Aptos", "font_size": 10})
-
         note_title_fmt = wb.add_format({"bold": True, "font_size": 11, "valign": "top", "underline": True, "font_name": "Aptos"})
         note_text_fmt = wb.add_format({"text_wrap": True, "valign": "top", "font_size": 10, "font_name": "Aptos"})
 
@@ -2584,155 +2371,97 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                     if col_name in df.columns:
                         col_idx = int(df.columns.get_loc(col_name))
                         ws.conditional_format(start_row, col_idx, last_row, col_idx, {"type": "no_errors", "format": fmt})
-            except Exception:
-                pass
+            except Exception: pass
 
-        # ==========================================
-        # 1. DASHBOARD SHEET
-        # ==========================================
+        # DASHBOARD
         ws2 = wb.add_worksheet("Dashboard")
         writer.sheets["Dashboard"] = ws2
-
         statuses = ["Matched", "Almost Matched", "Not Matched", None]
         rowlabels = ["CGST", "SGST", "IGST", "Total"]
 
         def _sum_component(status, col_name):
-            if not col_name or col_name not in combined_df.columns:
-                return 0.0
+            if not col_name or col_name not in combined_df.columns: return 0.0
             mask = (combined_df["Mapping"] == status) if status else slice(None)
-            s = combined_df.loc[mask, col_name].astype(str).str.replace(',', '').str.replace('nan', '')
+
+            # --- FIX 2: Handle duplicate column access cleanly ---
+            val = combined_df.loc[mask, col_name]
+            if isinstance(val, pd.DataFrame):
+                val = val.iloc[:, 0]
+            # ----------------------------------------------------
+
+            s = val.astype(str).str.replace(',', '').str.replace('nan', '')
             return float(pd.to_numeric(s, errors="coerce").fillna(0).sum())
 
         def _block_vals(status):
-            cg_pr = _sum_component(status, pair_cols.get("cgst_pr_col"))
-            sg_pr = _sum_component(status, pair_cols.get("sgst_pr_col"))
-            ig_pr = _sum_component(status, pair_cols.get("igst_pr_col"))
-            tot_pr = cg_pr + sg_pr + ig_pr
-
-            cg_2b = _sum_component(status, pair_cols.get("cgst_2b_col"))
-            sg_2b = _sum_component(status, pair_cols.get("sgst_2b_col"))
-            ig_2b = _sum_component(status, pair_cols.get("igst_2b_col"))
-            tot_2b = cg_2b + sg_2b + ig_2b
-            return ([cg_pr, sg_pr, ig_pr, tot_pr], [cg_2b, sg_2b, ig_2b, tot_2b])
+            cg_pr_val = _sum_component(status, pair_cols.get("cgst_pr_col"))
+            sg_pr_val = _sum_component(status, pair_cols.get("sgst_pr_col"))
+            ig_pr_val = _sum_component(status, pair_cols.get("igst_pr_col"))
+            tot_pr = cg_pr_val + sg_pr_val + ig_pr_val
+            cg_2b_val = _sum_component(status, pair_cols.get("cgst_2b_col"))
+            sg_2b_val = _sum_component(status, pair_cols.get("sgst_2b_col"))
+            ig_2b_val = _sum_component(status, pair_cols.get("igst_2b_col"))
+            tot_2b = cg_2b_val + sg_2b_val + ig_2b_val
+            return ([cg_pr_val, sg_pr_val, ig_pr_val, tot_pr], [cg_2b_val, sg_2b_val, ig_2b_val, tot_2b])
 
         total_cols = 1 + len(statuses) * 2
-        last_col_idx = total_cols - 1
-        ws2.merge_range(0, 0, 0, last_col_idx, "Summary - GSTR 2B vs. Purchase Register Reconciliation", dash_title_fmt)
-
-        top_row = 2
-        sub_row = top_row + 1
-        data_start = top_row + 2
-
+        ws2.merge_range(0, 0, 0, total_cols - 1, "Summary - GSTR 2B vs. Purchase Register Reconciliation", dash_title_fmt)
+        top_row = 2; sub_row = top_row + 1; data_start = top_row + 2
         ws2.write(top_row, 0, "Status", dash_table_hdr)
         col = 1
         for st in statuses:
             title = "Total" if st is None else st
             ws2.merge_range(top_row, col, top_row, col+1, title, dash_table_hdr)
             col += 2
-
         ws2.write(sub_row, 0, "Report", dash_table_hdr)
         col = 1
         for _ in statuses:
-            ws2.write(sub_row, col, "PR", dash_table_hdr)
-            ws2.write(sub_row, col + 1, "GSTR 2B", dash_table_hdr)
+            ws2.write(sub_row, col, "PR", dash_table_hdr); ws2.write(sub_row, col + 1, "GSTR 2B", dash_table_hdr)
             col += 2
-
-        for r, label in enumerate(rowlabels, start=data_start):
-            ws2.write(r, 0, label, dash_table_lbl)
-
+        for r, label in enumerate(rowlabels, start=data_start): ws2.write(r, 0, label, dash_table_lbl)
         col = 1
         for st in statuses:
             pr_vals, b2_vals = _block_vals(st)
-            for r, v in enumerate(pr_vals, start=data_start):
-                ws2.write_number(r, col, v, dash_table_num)
-            for r, v in enumerate(b2_vals, start=data_start):
-                ws2.write_number(r, col+1, v, dash_table_num)
+            for r, v in enumerate(pr_vals, start=data_start): ws2.write_number(r, col, v, dash_table_num)
+            for r, v in enumerate(b2_vals, start=data_start): ws2.write_number(r, col+1, v, dash_table_num)
             col += 2
-
         note_row_idx = data_start + len(rowlabels)
-        ws2.merge_range(note_row_idx, 0, note_row_idx, last_col_idx,
-                        "Note: The above table summary includes B2B (including RCM and POS) and CDNR values from GSTR 2B. Does not include imports or ISD",
-                        wb.add_format({"italic": True, "font_color": "red", "align": "left", "font_name": "Aptos", "font_size": 10}))
-
+        ws2.merge_range(note_row_idx, 0, note_row_idx, total_cols - 1, "Note: The above table summary includes B2B (including RCM and POS) and CDNR values from GSTR 2B. Does not include imports or ISD", wb.add_format({"italic": True, "font_color": "red", "align": "left", "font_name": "Aptos", "font_size": 10}))
         ws2.freeze_panes(data_start, 0)
         ws2.set_column(0, 0, 14)
-        for c in range(1, total_cols):
-            ws2.set_column(c, c, 15)
+        for c in range(1, total_cols): ws2.set_column(c, c, 15)
 
-        # --- ITC Table ---
-        end_of_table_row = data_start + len(rowlabels) - 1
-        new_table_start = end_of_table_row + 3
+        new_table_start = note_row_idx + 3
         ws2.merge_range(new_table_start, 0, new_table_start, 5, "ITC for GSTR 3B (for reference purposes only)", dash_title_fmt)
-
         itc_headers = ["Details", "Code", "Integrated Tax (₹)", "Central Tax (₹)", "State/UT Tax (₹)", "CESS (₹)"]
-        for ci, h in enumerate(itc_headers):
-            ws2.write(new_table_start + 1, ci, h, dash_table_hdr)
-
-        itc_rows = [
-            ("(A) ITC Available (whether in full or part)", "4A"),
-            ("(1) Import of goods", "4A1"),
-            ("(2) Import of services", "4A2"),
-            ("(3) Inward supplies liable to reverse charge (other than 1 & 2 above)", "4A3"),
-            ("(4) Inward supplies from ISD", "4A4"),
-            ("(5) All other ITC", "4A5"),
-            ("(B) ITC Reversed", "4B"),
-            ("(1) As per rules 38,42 & 43 of CGST Rules and section 17(5)", "4B1"),
-            ("(2) Others", "4B2"),
-            ("(C) Net ITC Available (A) - (B)", "4C"),
-            ("(D) Other Details", "4D"),
-            ("(1) ITC reclaimed which was reversed under Table 4(B)(2) in earlier tax period", "4D1"),
-            ("(2) Ineligible ITC under section 16(4) & ITC restricted due to PoS rules", "4D2"),
-        ]
-
+        for ci, h in enumerate(itc_headers): ws2.write(new_table_start + 1, ci, h, dash_table_hdr)
+        itc_rows = [("(A) ITC Available (whether in full or part)", "4A"), ("(1) Import of goods", "4A1"), ("(2) Import of services", "4A2"), ("(3) Inward supplies liable to reverse charge (other than 1 & 2 above)", "4A3"), ("(4) Inward supplies from ISD", "4A4"), ("(5) All other ITC", "4A5"), ("(B) ITC Reversed", "4B"), ("(1) As per rules 38,42 & 43 of CGST Rules and section 17(5)", "4B1"), ("(2) Others", "4B2"), ("(C) Net ITC Available (A) - (B)", "4C"), ("(D) Other Details", "4D"), ("(1) ITC reclaimed which was reversed under Table 4(B)(2) in earlier tax period", "4D1"), ("(2) Ineligible ITC under section 16(4) & ITC restricted due to PoS rules", "4D2")]
         row_idx = new_table_start + 2
         for details, code in itc_rows:
             is_header_row = code in ["4A", "4B", "4C", "4D"]
             txt_fmt = dash_table_lbl if is_header_row else dash_table_txt
-
             ws2.write(row_idx, 0, details, txt_fmt)
             ws2.write(row_idx, 1, code, txt_fmt)
-
             v = itc_values_by_code.get(code, {"integrated": 0.0, "central": 0.0, "state": 0.0, "cess": 0.0})
             ws2.write_number(row_idx, 2, float(v.get("integrated", 0.0)), dash_table_num)
             ws2.write_number(row_idx, 3, float(v.get("central", 0.0)), dash_table_num)
             ws2.write_number(row_idx, 4, float(v.get("state", 0.0)), dash_table_num)
             ws2.write_number(row_idx, 5, float(v.get("cess", 0.0)), dash_table_num)
             row_idx += 1
+        ws2.set_column(0, 0, 50); ws2.set_column(1, 5, 16)
 
-        ws2.set_column(0, 0, 50)
-        ws2.set_column(1, 5, 16)
-
-        notes_col = 7
-        notes_start_row = new_table_start + 1
+        notes_col = 7; notes_start_row = new_table_start + 1
         ws2.write(notes_start_row, notes_col, "Notes:", note_title_fmt)
-        itc_notes_list = [
-            "1. 4A1 (Import of goods): Data populated from the IMPG sheet in GSTR 2B.",
-            "2. 4A2 (Import of Services): User to input.",
-            "3. 4A3 (Domestic Reverse Charge): Data populated from the reverse charge column of the B2B sheet in GSTR 2B.",
-            "4. 4A4 (ISD): Data populated from the ISD sheet in GSTR 2B.",
-            "5. 4A5 (Net ITC): Data populated from B2B and B2B-CDNR sheet in GSTR 2B without reverse charge.",
-            "6. 4B1 (Permanent Reversal): User to input.",
-            "7. 4B2 (Temporary Reverse): Data populated from the Not Matched line items.",
-            "8. 4D1 (Past Period ITC): Data populated from the Matched and Almost Matched line items for lines matching with past period GSTR 2B."
-        ]
-        for i, note in enumerate(itc_notes_list):
-            ws2.merge_range(notes_start_row + 1 + i, notes_col, notes_start_row + 1 + i, notes_col + 10, note, note_text_fmt)
+        itc_notes_list = ["1. 4A1 (Import of goods): Data populated from the IMPG sheet in GSTR 2B.", "2. 4A2 (Import of Services): User to input.", "3. 4A3 (Domestic Reverse Charge): Data populated from the reverse charge column of the B2B sheet in GSTR 2B.", "4. 4A4 (ISD): Data populated from the ISD sheet in GSTR 2B.", "5. 4A5 (Net ITC): Data populated from B2B and B2B-CDNR sheet in GSTR 2B without reverse charge.", "6. 4B1 (Permanent Reversal): User to input.", "7. 4B2 (Temporary Reverse): Data populated from the Not Matched line items.", "8. 4D1 (Past Period ITC): Data populated from the Matched and Almost Matched line items for lines matching with past period GSTR 2B."]
+        for i, note in enumerate(itc_notes_list): ws2.merge_range(notes_start_row + 1 + i, notes_col, notes_start_row + 1 + i, notes_col + 10, note, note_text_fmt)
 
-        # ==========================================
-        # 2. RECONCILIATION SHEET
-        # ==========================================
+        # RECONCILIATION SHEET
         combined_df.to_excel(writer, index=False, sheet_name="Reconciliation")
         ws = writer.sheets["Reconciliation"]
         ws.freeze_panes(1, 0)
         ws.autofilter(0, 0, len(combined_df), max(0, combined_df.shape[1] - 1))
-        # Overwrite header
         _apply_header_style(ws, combined_df, header_fmt)
         _format_and_autosize(ws, combined_df, num_fmt, text_fmt)
         _highlight_columns(ws, combined_df, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
-
-        # ==========================================
-        # 3. COMMENTS SHEETS
-        # ==========================================
 
         # PR Comments
         pr_comments.to_excel(writer, index=False, sheet_name="PR - Comments")
@@ -2745,61 +2474,37 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
 
         # B2B Comments
         try:
-            if 'df_b2b_raw' in locals() and df_b2b_raw is not None and not df_b2b_raw.empty:
-                to_write = gstr2b_comments.copy() if 'gstr2b_comments' in locals() else df_b2b_raw_export.copy()
-
-                for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR"]:
-                    if _col not in to_write.columns: to_write[_col] = ""
-
-                if 'df_b2b_raw' in locals() and df_b2b_raw is not None:
-                    orig_cols = [c for c in df_b2b_raw.columns if c in to_write.columns]
-                    if not orig_cols: orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
-                else:
-                    orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
-                final_cols = orig_cols + [c for c in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"] if c in to_write.columns]
-                to_write = to_write.reindex(columns=final_cols)
-
-                to_write.to_excel(writer, index=False, sheet_name="GSTR 2B B2B - Comments")
-                ws4 = writer.sheets["GSTR 2B B2B - Comments"]
-                ws4.freeze_panes(1, 0)
-                ws4.autofilter(0, 0, len(to_write), max(0, to_write.shape[1] - 1))
-                _apply_header_style(ws4, to_write, header_fmt)
-                _format_and_autosize(ws4, to_write, num_fmt, text_fmt)
-                _highlight_columns(ws4, to_write, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
-            else:
-                pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]).to_excel(writer, index=False, sheet_name="GSTR 2B B2B - Comments")
-                _apply_header_style(writer.sheets["GSTR 2B B2B - Comments"], pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]), header_fmt)
-        except Exception:
-            app.logger.exception("Could not write B2B sheet to output workbook")
+            to_write = gstr2b_comments.copy() if not gstr2b_comments.empty else df_b2b_raw_export.copy()
+            for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR"]:
+                if _col not in to_write.columns: to_write[_col] = ""
+            orig_cols = [c for c in to_write.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
+            final_cols = orig_cols + [c for c in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"] if c in to_write.columns]
+            to_write = to_write.reindex(columns=final_cols)
+            to_write.to_excel(writer, index=False, sheet_name="GSTR 2B B2B - Comments")
+            ws4 = writer.sheets["GSTR 2B B2B - Comments"]
+            ws4.freeze_panes(1, 0)
+            ws4.autofilter(0, 0, len(to_write), max(0, to_write.shape[1] - 1))
+            _apply_header_style(ws4, to_write, header_fmt)
+            _format_and_autosize(ws4, to_write, num_fmt, text_fmt)
+            _highlight_columns(ws4, to_write, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
+        except Exception: app.logger.exception("Could not write B2B sheet to output workbook")
 
         # CDNR Comments
         try:
-            if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None and not df_cdnr_raw.empty:
-                to_write_cd = gstr2b_cdnr_comments.copy() if 'gstr2b_cdnr_comments' in locals() else df_cdnr_raw_export.copy()
-
-                for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR"]:
-                    if _col not in to_write_cd.columns: to_write_cd[_col] = ""
-
-                if 'df_cdnr_raw' in locals() and df_cdnr_raw is not None:
-                    orig_cd_cols = [c for c in df_cdnr_raw.columns if c in to_write_cd.columns]
-                    if not orig_cd_cols: orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
-                else:
-                    orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
-                final_cd_cols = orig_cd_cols + [c for c in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"] if c in to_write_cd.columns]
-                to_write_cd = to_write_cd.reindex(columns=final_cd_cols)
-
-                to_write_cd.to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")
-                ws5 = writer.sheets["GSTR 2B CDNR - Comments"]
-                ws5.freeze_panes(1, 0)
-                ws5.autofilter(0, 0, len(to_write_cd), max(0, to_write_cd.shape[1] - 1))
-                _apply_header_style(ws5, to_write_cd, header_fmt)
-                _format_and_autosize(ws5, to_write_cd, num_fmt, text_fmt)
-                _highlight_columns(ws5, to_write_cd, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
-            else:
-                pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]).to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")
-                _apply_header_style(writer.sheets["GSTR 2B CDNR - Comments"], pd.DataFrame(columns=["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"]), header_fmt)
-        except Exception:
-            app.logger.exception("Could not write CDNR sheet to output workbook")
+            to_write_cd = gstr2b_cdnr_comments.copy() if not gstr2b_cdnr_comments.empty else df_cdnr_raw_export.copy()
+            for _col in ["Mapping", "Remarks", "Reason", "Row Number in PR"]:
+                if _col not in to_write_cd.columns: to_write_cd[_col] = ""
+            orig_cd_cols = [c for c in to_write_cd.columns if c not in ["Mapping", "Remarks", "Reason", "Row Number in PR"]]
+            final_cd_cols = orig_cd_cols + [c for c in ["Mapping", "Remarks", "Reason", "Row Number in PR", "Tax Period"] if c in to_write_cd.columns]
+            to_write_cd = to_write_cd.reindex(columns=final_cd_cols)
+            to_write_cd.to_excel(writer, index=False, sheet_name="GSTR 2B CDNR - Comments")
+            ws5 = writer.sheets["GSTR 2B CDNR - Comments"]
+            ws5.freeze_panes(1, 0)
+            ws5.autofilter(0, 0, len(to_write_cd), max(0, to_write_cd.shape[1] - 1))
+            _apply_header_style(ws5, to_write_cd, header_fmt)
+            _format_and_autosize(ws5, to_write_cd, num_fmt, text_fmt)
+            _highlight_columns(ws5, to_write_cd, ["Mapping", "Remarks", "Reason"], comment_highlight_fmt)
+        except Exception: app.logger.exception("Could not write CDNR sheet to output workbook")
 
     output.seek(0)
     return output.read()
@@ -2809,7 +2514,17 @@ from rq import get_current_job
 import tempfile, os, time
 from concurrent.futures import ThreadPoolExecutor
 
-def process_reconcile(drive_id_2b:  str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal", target_return_period: str = "") -> dict:
+import pickle
+import tempfile
+import pandas as pd
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from rq import get_current_job
+
+# Make sure these helpers are imported or available in main.py:
+# download_from_drive, upload_to_drive, _run_reconciliation_pipeline, _generate_final_outputs
+
+def process_reconcile(drive_id_2b: str, drive_id_pr: str, selections: dict, user_id: str = "anon", gstr2b_format: str = "portal", target_return_period: str = "") -> dict:
     def _mark(pct, msg):
         j = get_current_job()
         if j:
@@ -2824,215 +2539,124 @@ def process_reconcile(drive_id_2b:  str, drive_id_pr: str, selections: dict, use
         in2b = os.path.join(td, "gstr2b.xlsx")
         inpr = os.path.join(td, "purchase_register.xlsx")
 
-        _mark(10, "Downloading inputs from Cloud Storage...")
+        _mark(10, "Downloading inputs...")
         def _dl(fid, path):
             download_from_drive(fid, path)
             return path
+
         with ThreadPoolExecutor(max_workers=2) as ex:
             fut2b = ex.submit(_dl, drive_id_2b, in2b)
             futpr = ex.submit(_dl, drive_id_pr, inpr)
-            fut2b.result(); futpr.result()
+            fut2b.result()
+            futpr.result()
 
-        _mark(25, "Processing files...")
-        x = selections
+        _mark(25, "Processing data...")
 
         # --- Capture Row Counts ---
         row_counts = {"pr": 0, "b2b": 0, "cdnr": 0}
         try:
             df_pr_check = pd.read_excel(inpr, engine="openpyxl")
             row_counts["pr"] = len(df_pr_check)
-
             with pd.ExcelFile(in2b) as xls:
                 offset = 6 if gstr2b_format == "portal" else 1
                 if "B2B" in xls.sheet_names:
                     raw = pd.read_excel(xls, "B2B", header=None)
                     row_counts["b2b"] = max(0, len(raw) - offset)
-                if "B2B-CDNR" in xls. sheet_names:
+                if "B2B-CDNR" in xls.sheet_names:
                     raw = pd.read_excel(xls, "B2B-CDNR", header=None)
                     row_counts["cdnr"] = max(0, len(raw) - offset)
-        except Exception as e:
-            print(f"Row Count Warning: {e}")
+        except Exception:
+            pass
+        # --------------------------
 
         _mark(40, "Running matching algorithms...")
-        blob = _run_reconciliation_pipeline(
+
+        # 1. Run Pipeline
+        state_data = _run_reconciliation_pipeline(
             tmp2b_path=in2b, tmppr_path=inpr,
             gstr2b_format=gstr2b_format,
             target_return_period=target_return_period,
-            inv_2b_b2b_sel=x. get("inv_2b_b2b",""), gst_2b_b2b_sel=x.get("gst_2b_b2b",""), date_2b_b2b_sel=x.get("date_2b_b2b",""), cgst_2b_b2b_sel=x.get("cgst_2b_b2b",""), sgst_2b_b2b_sel=x. get("sgst_2b_b2b",""), igst_2b_b2b_sel=x.get("igst_2b_b2b",""),
-            note_2b_cdnr_sel=x.get("note_2b_cdnr",""), gst_2b_cdnr_sel=x.get("gst_2b_cdnr",""), notedate_2b_cdnr_sel=x.get("notedate_2b_cdnr",""), cgst_2b_cdnr_sel=x.get("cgst_2b_cdnr",""), sgst_2b_cdnr_sel=x.get("sgst_2b_cdnr",""), igst_2b_cdnr_sel=x.get("igst_2b_cdnr",""),
-            inv_pr_sel=x.get("inv_pr",""), gst_pr_sel=x. get("gst_pr",""), date_pr_sel=x.get("date_pr",""), cgst_pr_sel=x.get("cgst_pr",""), sgst_pr_sel=x. get("sgst_pr",""), igst_pr_sel=x.get("igst_pr","")
+            inv_2b_b2b_sel=selections.get("inv_2b_b2b",""), gst_2b_b2b_sel=selections.get("gst_2b_b2b",""),
+            date_2b_b2b_sel=selections.get("date_2b_b2b",""), cgst_2b_b2b_sel=selections.get("cgst_2b_b2b",""),
+            sgst_2b_b2b_sel=selections.get("sgst_2b_b2b",""), igst_2b_b2b_sel=selections.get("igst_2b_b2b",""),
+            note_2b_cdnr_sel=selections.get("note_2b_cdnr",""), gst_2b_cdnr_sel=selections.get("gst_2b_cdnr",""),
+            notedate_2b_cdnr_sel=selections.get("notedate_2b_cdnr",""), cgst_2b_cdnr_sel=selections.get("cgst_2b_cdnr",""),
+            sgst_2b_cdnr_sel=selections.get("sgst_2b_cdnr",""), igst_2b_cdnr_sel=selections.get("igst_2b_cdnr",""),
+            inv_pr_sel=selections.get("inv_pr",""), gst_pr_sel=selections.get("gst_pr",""),
+            date_pr_sel=selections.get("date_pr",""), cgst_pr_sel=selections.get("cgst_pr",""),
+            sgst_pr_sel=selections.get("sgst_pr",""), igst_pr_sel=selections.get("igst_pr","")
         )
 
-        _mark(80, "Generating Excel report...")
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        # --- Save Row Counts to State Data (Important for Review persistence) ---
+        state_data["row_counts"] = row_counts
 
-        # New Naming Pattern: Recon_{email_part}_{timestamp}.xlsx
-        filename = f"Recon_{user_id}_{timestamp}.xlsx"
+        # 2. Check for "Almost Matched"
+        combined_df = state_data["combined_df"]
+        mask_almost = (combined_df["Mapping"] == "Almost Matched")
+
+        if mask_almost.any():
+            _mark(50, "Review required...")
+
+            # Prepare data for Review
+            review_df = combined_df[mask_almost].copy()
+            review_df = review_df.fillna("")
+
+            # --- KEY FIX: Rename Internal Columns for Display ---
+            rename_map = {}
+            # Handle variations in column naming
+            if "_INV_DISPLAY" in review_df.columns:
+                rename_map["_INV_DISPLAY"] = "Invoice No (2B)"
+            elif "_INV_DISPLAY_2B" in review_df.columns:
+                 rename_map["_INV_DISPLAY_2B"] = "Invoice No (2B)"
+
+            if "_DATE_DISPLAY" in review_df.columns:
+                rename_map["_DATE_DISPLAY"] = "Invoice Date (2B)"
+            elif "_DATE_DISPLAY_2B" in review_df.columns:
+                 rename_map["_DATE_DISPLAY_2B"] = "Invoice Date (2B)"
+
+            # Apply renaming
+            if rename_map:
+                review_df.rename(columns=rename_map, inplace=True)
+            # ----------------------------------------------------
+
+            review_df['id'] = review_df.index
+            review_rows = review_df.to_dict(orient='records')
+            columns = list(review_df.columns)
+
+            # Freeze State
+            pickle_filename = f"PendingState_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pkl"
+            pickle_path = os.path.join(td, pickle_filename)
+            with open(pickle_path, "wb") as f:
+                pickle.dump(state_data, f)
+
+            pickle_drive_id = upload_to_drive(pickle_path, pickle_filename)
+
+            return {
+                "status": "review_needed",
+                "review_data": review_rows,
+                "columns": columns,
+                "pickle_drive_id": pickle_drive_id
+            }
+
+        # 3. Finalize immediately if no review needed
+        _mark(90, "Finalizing report...")
+        blob = _generate_final_outputs(state_data)
+
+        filename = f"Reconciliation_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
         out_path = os.path.join(td, filename)
-
         with open(out_path, "wb") as f:
             f.write(blob)
 
-        # --- NEW: Generate "Not Matched" Only Report ---
-        filename_nm = f"NotMatched_{user_id}_{timestamp}.xlsx"
-        out_path_nm = os.path.join(td, filename_nm)
-
-        try:
-            # 1. Read the main report back to filter it
-            # (We read the 'Reconciliation' sheet where the main data is)
-            df_full = pd.read_excel(out_path, sheet_name="Reconciliation", engine="openpyxl")
-
-            # 2. Filter for "Not Matched" in the Mapping column
-            # Column names might be upper or title case, so we normalize
-            col_map = next((c for c in df_full.columns if str(c).lower() == "mapping"), None)
-
-            if col_map:
-                df_nm = df_full[df_full[col_map] == "Not Matched"]
-            else:
-                df_nm = pd.DataFrame() # Fallback
-
-            # 3. Save to new Excel file
-            df_nm.to_excel(out_path_nm, index=False, sheet_name="Not Matched Rows")
-
-            # 4. Upload to Drive
-            drive_id_nm = upload_to_drive(out_path_nm, filename_nm)
-
-        except Exception as e:
-            print(f"Error creating Not Matched report: {e}")
-            drive_id_nm = None
-
-        # --- EXTRACT DASHBOARD TABLE DATA ---
-        dashboard_stats = {}
-
-        try:
-            # 1. Find Header Row
-            df_raw = pd.read_excel(out_path, sheet_name="Reconciliation", engine="openpyxl", header=None, nrows=10)
-
-            header_idx = 0
-            for idx, row in df_raw.iterrows():
-                row_str = " ".join([str(val) for val in row if pd.notna(val)]).upper()
-                if "MAPPING" in row_str:
-                    header_idx = idx
-                    break
-
-            # 2. Re-read with correct header
-            df_recon = pd.read_excel(out_path, sheet_name="Reconciliation", engine="openpyxl", header=header_idx)
-
-            # 3. Normalize Columns (Uppercase)
-            df_recon. columns = [str(c).upper().strip() for c in df_recon.columns]
-
-            print(f"DEBUG: Reconciliation Columns: {list(df_recon.columns)}")
-
-            # 4. Find columns using keyword matching
-            def find_column(keywords):
-                """Find a column that contains ALL keywords"""
-                for col in df_recon.columns:
-                    if all(kw in col for kw in keywords):
-                        return col
-                return None
-
-            def find_column_any(keywords):
-                """Find a column that contains ANY of the keywords"""
-                for col in df_recon.columns:
-                    for kw in keywords:
-                        if kw in col:
-                            return col
-                return None
-
-            # PR Columns
-            col_pr_cgst = find_column(["CGST", "_PR"]) or find_column(["CGST", "AMT"])
-            col_pr_sgst = find_column(["SGST", "_PR"]) or find_column(["SGST", "AMT"])
-            col_pr_igst = find_column(["IGST", "_PR"]) or find_column(["IGST", "AMT"])
-
-            # 2B Columns
-            col_2b_cgst = find_column(["CENTRAL", "_2B"]) or find_column(["CGST", "_2B"])
-            col_2b_sgst = find_column(["STATE", "_2B"]) or find_column(["SGST", "_2B"])
-            col_2b_igst = find_column(["INTEGRATED", "_2B"]) or find_column(["IGST", "_2B"])
-
-            # Mapping column
-            col_mapping = find_column_any(["MAPPING"])
-
-            print(f"DEBUG: PR Cols:  CGST={col_pr_cgst}, SGST={col_pr_sgst}, IGST={col_pr_igst}")
-            print(f"DEBUG:  2B Cols: CGST={col_2b_cgst}, SGST={col_2b_sgst}, IGST={col_2b_igst}")
-            print(f"DEBUG: Mapping Col: {col_mapping}")
-
-            def _sum_col(df, status, col_name):
-                """Sum values in a column, optionally filtered by status"""
-                if not col_name or not col_mapping:
-                    return 0.0
-
-                try:
-                    if status:
-                        mask = df[col_mapping].astype(str).str.strip() == status
-                        filtered_df = df.loc[mask, col_name]
-                    else:
-                        filtered_df = df[col_name]  # All rows for Total
-
-                    # Convert to numeric properly - iterate to avoid string concatenation
-                    total = 0.0
-                    for val in filtered_df:
-                        if pd. isna(val):
-                            continue
-                        # Convert to string, remove commas, then to float
-                        val_str = str(val).replace(',', '').strip()
-                        if val_str and val_str.lower() != 'nan':
-                            try:
-                                total += float(val_str)
-                            except ValueError:
-                                continue
-                    return round(total, 2)
-                except Exception as e:
-                    print(f"DEBUG: _sum_col error for {col_name}: {e}")
-                    return 0.0
-
-            # 5. Build Rows
-            categories = ["Matched", "Almost Matched", "Not Matched", None]
-            table_rows = []
-
-            for cat in categories:
-                label = cat if cat else "Total"
-
-                pr_cgst = _sum_col(df_recon, cat, col_pr_cgst)
-                pr_sgst = _sum_col(df_recon, cat, col_pr_sgst)
-                pr_igst = _sum_col(df_recon, cat, col_pr_igst)
-                pr_tot = round(pr_cgst + pr_sgst + pr_igst, 2)
-
-                b2_cgst = _sum_col(df_recon, cat, col_2b_cgst)
-                b2_sgst = _sum_col(df_recon, cat, col_2b_sgst)
-                b2_igst = _sum_col(df_recon, cat, col_2b_igst)
-                b2_tot = round(b2_cgst + b2_sgst + b2_igst, 2)
-
-                table_rows.append({
-                    "status": label,
-                    "pr":  {"cgst": pr_cgst, "sgst": pr_sgst, "igst": pr_igst, "total": pr_tot},
-                    "b2b": {"cgst": b2_cgst, "sgst": b2_sgst, "igst": b2_igst, "total": b2_tot}
-                })
-
-                print(f"DEBUG: {label} - PR: {pr_cgst}+{pr_sgst}+{pr_igst}={pr_tot}, 2B: {b2_cgst}+{b2_sgst}+{b2_igst}={b2_tot}")
-
-            dashboard_stats["table"] = table_rows
-            dashboard_stats["counts"] = row_counts
-
-        except Exception as e:
-            print(f"Stats Extraction Failed: {e}")
-            import traceback
-            traceback.print_exc()
-            dashboard_stats["table"] = []
-            dashboard_stats["counts"] = row_counts
-
-        _mark(90, "Saving to Cloud Storage...")
         result_id = upload_to_drive(out_path, filename)
 
-        print(f"DEBUG: Result saved to Google Drive with ID: {result_id}")
+        # --- Generate Dashboard Stats ---
+        # Ensure _build_dashboard_stats_dict is defined in main.py
+        dashboard_stats = _build_dashboard_stats_dict(state_data)
 
-        _mark(100, "Done!")
-
-        # CRITICAL: Return both IDs
         return {
+            "status": "finished",
             "result_drive_id": result_id,
             "filename": filename,
-            "nm_drive_id": drive_id_nm,     # <--- Add this
-            "nm_filename": filename_nm,     # <--- Add this
             "dashboard_stats": dashboard_stats
         }
 
@@ -3681,11 +3305,10 @@ def render_progress(job_id):
     """
     return render_template("progress.html", job_id=job_id)
 
-# ==========================================
-# NEW ROUTE: Excel Consolidation (Preserves Original Headers)
-# ==========================================
+from flask import make_response
 @app.route('/consolidate', methods=['POST'])
 def consolidate_files():
+    # 1. Check Login
     if not session.get('logged_in'):
         flash('Please log in to use this feature.', 'warning')
         return redirect(url_for('login'))
@@ -3695,59 +3318,76 @@ def consolidate_files():
         flash("No files selected.", "warning")
         return redirect(url_for("index"))
 
+    # 2. DETERMINE RULES
+    doc_type = request.form.get('doc_type', 'gstr2b')
+    format_option = request.form.get('format_option', 'custom')
+
+    # Rule: Portal 2B = Drop 6 rows. Others = Drop 1 row.
+    if doc_type == 'gstr2b' and format_option == 'portal':
+        header_height = 6
+    else:
+        header_height = 1
+
     try:
         sheets_map = defaultdict(list)
-        ref_headers = {}
+        initialized_sheets = set()
 
         for file in files:
-            if not file.filename.endswith(('.xls', '.xlsx')):
+            if not file.filename.lower().endswith(('.xls', '.xlsx')):
                 continue
 
             try:
-                # KEY CHANGE 1: header=None
-                # We read the first row as DATA, not headers. This prevents pandas from
-                # renaming duplicate columns or adding "Unnamed: 0" labels.
-                xls_dict = pd.read_excel(file, sheet_name=None, engine="openpyxl", header=None, dtype=str)
+                # Read ALL rows (header=None keeps original row indices)
+                xls_dict = pd.read_excel(file, sheet_name=None, engine="openpyxl", header=None, dtype=object)
             except Exception as e:
-                flash(f"Error reading {file.filename}: {e}", "danger")
+                flash(f"Error reading {file.filename}: {str(e)}", "danger")
                 return redirect(url_for("index"))
 
             for sheet_name, df in xls_dict.items():
                 if df.empty:
                     continue
 
-                # Clean headers: Extract the first row (index 0) to use as the header reference
-                # We strip whitespace to be safe, but we keep the exact original text.
-                current_header = [str(x).strip() if pd.notna(x) else "" for x in df.iloc[0].tolist()]
+                clean_sheet_name = sheet_name.strip()
 
-                if sheet_name not in ref_headers:
-                    # First file for this sheet?
-                    # Set it as Master Reference and keep the WHOLE dataframe (including Row 0)
-                    ref_headers[sheet_name] = current_header
-                    sheets_map[sheet_name].append(df)
+                if clean_sheet_name not in initialized_sheets:
+                    # File 1: Keep completely intact
+                    sheets_map[clean_sheet_name].append(df)
+                    initialized_sheets.add(clean_sheet_name)
                 else:
-                    # Subsequent files: Validate Row 0 against Master Reference
-                    if current_header != ref_headers[sheet_name]:
-                        flash(f"Header mismatch in file '{file.filename}', sheet '{sheet_name}'. "
-                              f"The column headings in the first row do not match the first file uploaded. "
-                              f"Please ensure all files have identical headers.", "danger")
-                        return redirect(url_for("index"))
+                    # File 2+: Remove header rows
+                    if len(df) > header_height:
+                        sheets_map[clean_sheet_name].append(df.iloc[header_height:])
 
-                    # Match found! Drop Row 0 (the header) and append only the data
-                    sheets_map[sheet_name].append(df.iloc[1:])
-
-        # Concatenate and Write
+        # 3. WRITE & FORMAT
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            data_written = False
+        data_written = False
+
+        with pd.ExcelWriter(output, engine="xlsxwriter", datetime_format='dd-mm-yyyy') as writer:
+            workbook = writer.book
+            num_format = workbook.add_format({'num_format': '#,##0.00', 'align': 'right'})
+
             for sheet_name, dfs in sheets_map.items():
                 if dfs:
                     merged_df = pd.concat(dfs, ignore_index=True)
 
-                    # KEY CHANGE 2: header=False, index=False
-                    # Since the first row of 'merged_df' is already our original header (from the first file),
-                    # we tell pandas NOT to write its own headers. This ensures 100% original fidelity in Row 1.
+                    # Convert Numbers
+                    for col_idx in range(len(merged_df.columns)):
+                        col_name = merged_df.columns[col_idx]
+                        merged_df[col_name] = pd.to_numeric(merged_df[col_name], errors='ignore')
+
                     merged_df.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
+
+                    # Apply Formatting
+                    worksheet = writer.sheets[sheet_name]
+                    for idx, col in enumerate(merged_df.columns):
+                        is_number = pd.api.types.is_numeric_dtype(merged_df[col])
+                        is_date = pd.api.types.is_datetime64_any_dtype(merged_df[col])
+
+                        if is_number and not is_date:
+                            worksheet.set_column(idx, idx, None, num_format)
+                        elif is_date:
+                            worksheet.set_column(idx, idx, 15)
+
                     data_written = True
 
             if not data_written:
@@ -3756,16 +3396,23 @@ def consolidate_files():
 
         output.seek(0)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-        return send_file(
+        prefix = "GSTR2B" if doc_type == 'gstr2b' else "PurchaseRegister"
+        filename = f"Consolidated_{prefix}_{timestamp}.xlsx"
+
+        # 4. CREATE RESPONSE WITH COOKIE
+        # This cookie tells the browser "We are done!"
+        response = make_response(send_file(
             output,
             as_attachment=True,
-            download_name=f"Consolidated_Output_{timestamp}.xlsx",
+            download_name=filename,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        ))
+        response.set_cookie('consolidation_complete', 'true', path='/')
+        return response
 
     except Exception as e:
         app.logger.error(f"Consolidation Error: {e}")
-        flash("An unexpected error occurred during consolidation.", "danger")
+        flash(f"System Error: {str(e)}", "danger")
         return redirect(url_for("index"))
 
 # ==========================================
@@ -3800,6 +3447,154 @@ def delete_history(report_id):
         flash('Could not remove row. Please try again.', 'danger')
 
     return redirect(url_for('history'))
+
+@app.route("/review_matches", methods=["GET"])
+def review_matches():
+    job_id = request.args.get("job_id")
+    if not job_id: return redirect(url_for("index"))
+
+    try:
+        job = Job.fetch(job_id, connection=rconn)
+        if job.get_status() == "finished":
+            result = job.result
+            if result.get("status") == "review_needed":
+                rows = result.get("review_data", [])
+                columns = result.get("columns", [])
+                pickle_id = result.get("pickle_drive_id")
+                return render_template("review.html", rows=rows, columns=columns, pickle_id=pickle_id)
+    except Exception:
+        pass
+
+    flash("Review not required or job expired.")
+    return redirect(url_for("index"))
+
+@app.route("/submit_review", methods=["POST"])
+def submit_review():
+    pickle_id = request.form.get("pickle_id")
+    accepted = request.form.getlist("accepted_rows")
+    accepted_indices = [int(x) for x in accepted]
+
+    # Get User ID for filename
+    user_email = session.get("email")
+    if user_email:
+        user_identifier = re.sub(r'[^a-zA-Z0-9_\-\.]', '', user_email.split('@')[0])
+    else:
+        user_identifier = str(session.get("user_id", "anon"))
+
+    # Start the Finalization Job
+    job = q.enqueue(
+        "main.finalize_reconciliation_job",
+        pickle_id, accepted_indices, str(user_identifier),
+        job_timeout=-1, result_ttl=86400
+    )
+
+    # Show progress page again (it will jump to 100% quickly)
+    return render_template("progress.html", job_id=job.id)
+
+def _build_dashboard_stats_dict(state_data):
+    """
+    Generates the dictionary required by the frontend dashboard.
+    """
+    combined_df = state_data["combined_df"]
+    pair_cols = state_data["pair_cols"]
+    row_counts = state_data.get("row_counts", {"pr": 0, "b2b": 0, "cdnr": 0})
+
+    # Helper to safe-sum columns
+    def _sum_col(mask, col_name):
+        if not col_name or col_name not in combined_df.columns: return 0.0
+        s = combined_df.loc[mask, col_name].astype(str).str.replace(',', '').str.replace('nan', '')
+        return float(pd.to_numeric(s, errors="coerce").fillna(0).sum())
+
+    stats_table = []
+    statuses = ["Matched", "Almost Matched", "Not Matched", None] # None = Total
+
+    for status in statuses:
+        if status:
+            mask = combined_df["Mapping"] == status
+            label = status
+        else:
+            mask = slice(None) # Select all
+            label = "Total"
+
+        # Calculate PR Side
+        cg_pr = _sum_col(mask, pair_cols.get("cgst_pr_col"))
+        sg_pr = _sum_col(mask, pair_cols.get("sgst_pr_col"))
+        ig_pr = _sum_col(mask, pair_cols.get("igst_pr_col"))
+        tot_pr = cg_pr + sg_pr + ig_pr
+
+        # Calculate 2B Side
+        cg_2b = _sum_col(mask, pair_cols.get("cgst_2b_col"))
+        sg_2b = _sum_col(mask, pair_cols.get("sgst_2b_col"))
+        ig_2b = _sum_col(mask, pair_cols.get("igst_2b_col"))
+        tot_2b = cg_2b + sg_2b + ig_2b
+
+        stats_table.append({
+            "status": label,
+            "pr": {"cgst": cg_pr, "sgst": sg_pr, "igst": ig_pr, "total": tot_pr},
+            "b2b": {"cgst": cg_2b, "sgst": sg_2b, "igst": ig_2b, "total": tot_2b}
+        })
+
+    return {
+        "counts": row_counts,
+        "table": stats_table
+    }
+
+def finalize_reconciliation_job(pickle_drive_id, accepted_indices, user_id):
+    """
+    Resumes the process, updates mappings, and generates final outputs + stats.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        # Download the frozen state
+        pickle_path = os.path.join(td, "state.pkl")
+        download_from_drive(pickle_drive_id, pickle_path)
+
+        with open(pickle_path, "rb") as f:
+            state_data = pickle.load(f)
+
+        df = state_data["combined_df"]
+
+        # Identify "Almost Matched" rows
+        almost_mask = df["Mapping"] == "Almost Matched"
+        all_almost_indices = df[almost_mask].index.tolist()
+        accepted_set = set(accepted_indices)
+
+        # Apply User Decisions
+        for idx in all_almost_indices:
+            if idx in accepted_set:
+                df.at[idx, "Mapping"] = "Matched"
+                df.at[idx, "Remarks"] = "Accepted by User"
+                df.at[idx, "Reason"] = "User Verified"
+            else:
+                df.at[idx, "Mapping"] = "Not Matched"
+                df.at[idx, "Remarks"] = "Rejected by User"
+                orig = str(df.at[idx, "Reason"])
+                df.at[idx, "Reason"] = f"{orig} (Rejected)"
+
+        # Update state
+        state_data["combined_df"] = df
+
+        # Generate Final Output
+        blob = _generate_final_outputs(state_data)
+
+        # Save Final Excel
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"Recon_{user_id}_{timestamp}.xlsx"
+        out_path = os.path.join(td, filename)
+        with open(out_path, "wb") as f:
+            f.write(blob)
+
+        result_id = upload_to_drive(out_path, filename)
+
+        # --- NEW: Calculate Real Dashboard Stats ---
+        dashboard_stats = _build_dashboard_stats_dict(state_data)
+        # -------------------------------------------
+
+        return {
+            "status": "finished",
+            "result_drive_id": result_id,
+            "filename": filename,
+            "dashboard_stats": dashboard_stats
+        }
 
 # --- Register Razorpay Blueprint ---
 from payments import payment_bp

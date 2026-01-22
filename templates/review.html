@@ -57,6 +57,12 @@
         /* Highlight specific columns if needed */
         .col-mapping { background-color: #fff3cd; font-weight: bold; }
 
+        /* NEW: Right-align numeric cells + tabular numbers */
+        td.num {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
         .footer-panel { padding: 20px; text-align: right; background: #f8f9fa; border-radius: 0 0 8px 8px; }
     </style>
 </head>
@@ -100,7 +106,7 @@
                         </td>
                         {% for col in columns %}
                             {% if col != 'id' and not col.startswith('_') %}
-                                <td>{{ row[col] }}</td>
+                                <td data-col="{{ col }}">{{ row[col] }}</td>
                             {% endif %}
                         {% endfor %}
                     </tr>
@@ -133,6 +139,33 @@
         const checkedCount = document.querySelectorAll('.row-cb:checked').length;
         countSpan.innerText = checkedCount + " selected (will be Matched)";
     }
+
+    // NEW: Detect numeric columns and format to 2 decimals + right-align
+    // Heuristic: column name contains tax/value/amount/cgst/sgst/igst/cess/total
+    const numericNameRe = /(tax|amount|value|cgst|sgst|igst|cess|total)/i;
+
+    function parseNumberStrict(s) {
+        if (s == null) return null;
+        const t = String(s).trim();
+        if (!t) return null;
+        // remove commas
+        const cleaned = t.replace(/,/g, '');
+        // allow negative and decimals
+        if (!/^[-+]?\d+(\.\d+)?$/.test(cleaned)) return null;
+        const n = Number(cleaned);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    document.querySelectorAll('tbody td[data-col]').forEach(td => {
+        const colName = td.getAttribute('data-col') || '';
+        if (!numericNameRe.test(colName)) return;
+
+        const n = parseNumberStrict(td.textContent);
+        if (n === null) return;
+
+        td.classList.add('num');
+        td.textContent = n.toFixed(2);
+    });
 </script>
 </body>
 </html>

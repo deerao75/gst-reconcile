@@ -556,6 +556,16 @@ def format_date_display(d) -> str:
         return d.strftime("%d-%m-%Y")
     return str(d)
 
+def date_key_yyyymmdd(x) -> str:
+    """Unambiguous key for comparing dates."""
+    d = parse_date_cell(x)
+    return d.strftime("%Y%m%d") if d else ""
+
+def date_iso_yyyy_mm_dd(x) -> str:
+    """Force ISO text output so Excel cannot reformat to MM-DD-YYYY."""
+    d = parse_date_cell(x)
+    return d.strftime("%Y-%m-%d") if d else ""
+
 def parse_amount(x) -> float:
     s = as_text(x)
     if not s: return 0.0
@@ -905,9 +915,9 @@ def build_pairwise_recon(
 
         mismatches = []
         if date_pr_col and date_2b_col:
-            d_pr = parse_date_cell(r.get(date_pr_col, ""))
-            d_2b = parse_date_cell(r.get(date_2b_col, ""))
-            if (d_pr or d_2b) and (d_pr != d_2b):
+            k_pr = date_key_yyyymmdd(r.get(date_pr_col, ""))
+            k_2b = date_key_yyyymmdd(r.get(date_2b_col, ""))
+            if (k_pr or k_2b) and (k_pr != k_2b):
                 mismatches.append("Invoice Date")
 
         def neq_round_abs(a, b):
@@ -1035,10 +1045,13 @@ def build_pairwise_recon(
 
     out = out[final_cols]
 
-    two_b_month_series = ""
-    if gstr1_status_2b and gstr1_status_2b in out.columns:
-        two_b_month_series = out[gstr1_status_2b]
-    out["2B month"] = two_b_month_series
+    # --- Force ISO date display as TEXT for both PR and 2B ---
+    # This prevents Excel from flipping to MM-DD-YYYY.
+    if date_pr_col and date_pr_col in out.columns:
+        out[date_pr_col] = out[date_pr_col].apply(date_iso_yyyy_mm_dd)
+    if date_2b_col and date_2b_col in out.columns:
+        out[date_2b_col] = out[date_2b_col].apply(date_iso_yyyy_mm_dd)
+    # ---------------------------------------------------------
 
     return out, {
         "cgst_pr_col": cgst_pr_col, "sgst_pr_col": sgst_pr_col, "igst_pr_col": igst_pr_col,

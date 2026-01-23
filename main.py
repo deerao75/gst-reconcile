@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv(override=False)  # ensures both Flask and RQ worker see .env
 import math
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import Optional, Dict, List, Tuple
 from collections import defaultdict
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session, jsonify, after_this_request
@@ -20,7 +20,6 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 # NEW: add these imports near the other top-level imports in main.py
 import sqlalchemy as sa
 from sqlalchemy import inspect
-from datetime import date, timedelta
 from flask_mail import Mail, Message
 from itsdangerous import URLSafeTimedSerializer
 
@@ -602,32 +601,28 @@ def consolidate_by_key(
     text_cols = text_cols or []
     work = df.copy()
 
-    # --- NEW: Remove Bottom "Total" Rows ---
-    # Strategy: identifying rows where the GSTIN or Invoice Number column
-    # explicitly says "Total" (common in Excel exports).
-    # We do NOT search the whole column, just check if the value is "Total"
-    # to avoid false positives.
-
+    # --- Remove Bottom "Total" Rows ---
     def is_total_label(val):
         s = str(val).strip().lower()
         return s == "total" or s.startswith("total ")
 
-    # If a row has "Total" in the GSTIN or Invoice Number column, it is likely a footer.
-    # We filter these out before processing.
     mask_is_total = work[gstin_col].apply(is_total_label) | work[inv_col].apply(is_total_label)
     work = work[~mask_is_total].copy()
 
-    # Additionally, verify numeric columns. If a row has text like "Total" in a
-    # numeric column (which `parse_amount` would turn to 0), we should ensure
-    # we aren't keeping a footer row that just happened to have a blank GSTIN.
-    # (This step is often implicitly handled by the dropna/groupby, but being explicit helps).
-    # --- END NEW ---
+    # ---------- KEY FIX: preserve original invoice for display ----------
+    # Keep the exact PR invoice (after only safe string casting) for output display.
+    # This prevents inv_basic()/normalization from changing what user sees.
+    work["_INV_ORIG"] = work[inv_col].map(as_text)
 
+    # Build matching keys from normalized values (do NOT use these for display).
     work["_GST_KEY"] = work[gstin_col].map(clean_gstin)
-    work[inv_col] = work[inv_col].map(as_text)
-    work["_INV_KEY"] = work[inv_col].map(inv_basic)
+    work["_INV_KEY"] = work["_INV_ORIG"].map(inv_basic)
 
-    # Filter out rows where the keys became empty after cleaning (e.g. empty rows or pure text rows)
+    # Keep the visible invoice column as original (not parsed)
+    work[inv_col] = work["_INV_ORIG"]
+    # -------------------------------------------------------------------
+
+    # Filter out rows where the keys became empty after cleaning
     work = work[work["_GST_KEY"] != ""].copy()
 
     for c in numeric_cols:
@@ -640,25 +635,52 @@ def consolidate_by_key(
         work["_DATE_TMP"] = None
 
     agg_dict = {}
+
+    # numeric sums
     for c in numeric_cols:
-        if c in work.columns: agg_dict[c] = "sum"
+        if c in work.columns:
+            agg_dict[c] = "sum"
 
+    # keep text cols
     for c in text_cols:
-        if c in work.columns: agg_dict[c] = "first"
+        if c in work.columns:
+            agg_dict[c] = "first"
 
+    # dates: keep earliest
     agg_dict["_DATE_TMP"] = "min"
+
+    # keep gstin and invoice for display
     agg_dict[gstin_col] = "first"
     agg_dict[inv_col] = "first"
 
-    protected = set(["_GST_KEY", "_INV_KEY", "_DATE_TMP"] + [gstin_col, inv_col] + numeric_cols + text_cols)
+    # also keep preserved invoice explicitly (so it survives even if inv_col name changes upstream)
+    agg_dict["_INV_ORIG"] = "first"
+
+    protected = set(
+        ["_GST_KEY", "_INV_KEY", "_DATE_TMP", "_INV_ORIG"]
+        + [gstin_col, inv_col]
+        + numeric_cols
+        + text_cols
+    )
+
     for c in work.columns:
         if c not in protected and c not in agg_dict:
             agg_dict[c] = "first"
 
     grouped = work.groupby(["_GST_KEY", "_INV_KEY"], dropna=False).agg(agg_dict).reset_index()
+
+    # Restore invoice display column from preserved original (strong guarantee)
+    if "_INV_ORIG" in grouped.columns:
+        grouped[inv_col] = grouped["_INV_ORIG"]
+
     if "_DATE_TMP" in grouped.columns:
         grouped[date_col or "Invoice Date (derived)"] = grouped["_DATE_TMP"]
         grouped.drop(columns=["_DATE_TMP"], inplace=True)
+
+    # Optional: drop helper column from final output if you don't want it visible
+    if "_INV_ORIG" in grouped.columns:
+        grouped.drop(columns=["_INV_ORIG"], inplace=True)
+
     return grouped
 # -------------------- Reconciliation (with rounding + "Almost Match") --------------------
 def build_lookup(df_2b: pd.DataFrame, inv_col_2b: str, gstin_col_2b: str) -> Dict[str, List[int]]:
@@ -938,11 +960,9 @@ def build_pairwise_recon(
     out["Reason"] = reason
 
     if inv_pr_col in out.columns:
+        # Keep PR invoice exactly as PR provided (clean text only).
+        # Do NOT replace with _INV_KEY (that is only for matching).
         out[inv_pr_col] = out[inv_pr_col].map(as_text)
-        mask_fix = (out[inv_pr_col].isin(["", "0"])) | (out[inv_pr_col].isna())
-        if isinstance(pr_orig_present, pd.Series):
-            mask_fix = mask_fix & pr_orig_present.reindex(out.index).fillna(False)
-        out.loc[mask_fix, inv_pr_col] = out.loc[mask_fix, "_INV_KEY"]
 
     source_sheet_col_2b = "_SOURCE_SHEET_2B"
     if source_sheet_col_2b in out.columns and gst_2b_col in out.columns:
@@ -1569,14 +1589,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
                 return guess
         return None
 
-    def _pick_col_contains(df, pattern):
-        if df is None:
-            return None
-        pat = re.compile(pattern, re.I)
-        for c in df.columns:
-            if pat.search(str(c)):
-                return c
-        return None
     cdnr_note_hard  = _pick_col_contains(df_cdnr_raw, r"\bnote\s*number\b")
     cdnr_ndate_hard = _pick_col_contains(df_cdnr_raw, r"\bnote\s*date\b")
 
@@ -1720,14 +1732,6 @@ def _run_reconciliation_pipeline(tmp2b_path: str, tmppr_path: str, gstr2b_format
             df[col] = df.apply(lambda r: -abs(parse_amount(r[col])) if r["_NOTE_TYPE"] == "credit" else abs(parse_amount(r[col])), axis=1)
 
         return df
-
-    # --- START: THE FIX ---
-    # We pass a .copy() to apply_signs, ensuring the original df_b2b_raw and df_cdnr_raw are not modified.
-    #df_b2b_raw_signed = apply_signs(df_b2b_raw.copy(), note_type_col=note_type_2b)
-    #df_cdnr_raw_signed = apply_signs(df_cdnr_raw.copy(), note_type_col=note_type_2b)
-    # Signed copy for IMPG (if present) — used for 4A1
-    #df_impg_raw_signed = apply_signs(df_impg_raw.copy(), note_type_col=None) if (df_impg_raw is not None and not df_impg_raw.empty) else pd.DataFrame()
-    # --- END: THE FIX ---
 
     gst_pr = match_provided(df_pr_raw, gst_pr_sel) or ensure_col(df_pr_raw, gst_pr_sel, GSTIN_CANDIDATES_PR,
                         penalties=AVOID_RECIPIENT_GSTIN_FOR_PR,
@@ -2523,16 +2527,10 @@ def _generate_final_outputs(state_data):
     return output.read()
 
 # ------- NEW: Background worker task (called by RQ) -------
-from rq import get_current_job
-import tempfile, os, time
-from concurrent.futures import ThreadPoolExecutor
-
 import pickle
 import tempfile
-import pandas as pd
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from rq import get_current_job
+
 
 # Make sure these helpers are imported or available in main.py:
 # download_from_drive, upload_to_drive, _run_reconciliation_pipeline, _generate_final_outputs
@@ -2857,28 +2855,6 @@ def login():
 
     return render_template('login.html')
 
-# @app.route('/register', methods=['GET', 'POST'])
-# def register():
-#     if request.method == 'POST':
-#         email = request.form['email']
-#         password = request.form['password']
-#         if User.query.filter_by(email=email).first():
-#             flash('Email already registered.')
-#         else:
-#             new_user = User(
-#                 email=email,
-#                 password_hash=generate_password_hash(password)
-#             )
-#             db.session.add(new_user)
-#             db.session.commit()
-#             flash('Registration successful. Please log in.')
-#             return redirect(url_for('login'))
-#     return render_template('register.html')
-
-# main.py - Temporary register route to create an admin
-
-# main.py - Original/Correct Register Route
-
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -2978,16 +2954,8 @@ def subscribe():
     return render_template('subscribe.html')
 
 from typing import Any, Dict, Optional
-
-import hashlib
-import os
 from flask import request, session, url_for
-import html
 import time
-import secrets
-import re
-
-
 from functools import wraps
 
 # --- Admin Functionality ---
@@ -3058,9 +3026,6 @@ def admin_change_password(user_id):
     db.session.commit()
     flash(f'Password for {user_to_edit.email} has been updated.', 'success')
     return redirect(url_for('admin_dashboard'))
-
-# Add this at the top with your other imports
-from datetime import date, timedelta
 
 @app.route('/start_trial', methods=['POST'])
 def start_trial():
